@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 from unittest.mock import MagicMock
 
+import geopandas as gpd
 import pandas as pd
 import pytest
 from shapely.geometry import Polygon
@@ -265,6 +266,91 @@ def test_parse_jsonl_tile_skips_malformed_lines(cfg: Config) -> None:
     gdf = bld_mod._parse_jsonl_tile(text, cfg)
     # Only the first line is a valid Polygon; the Point and garbage are skipped.
     assert len(gdf) == 1
+
+
+def test_load_buildings_for_country_streams_and_filters(
+    cfg: Config, tmp_path
+) -> None:
+    """The country-scale loader keeps only footprints inside the buffer union."""
+    from rvi.ingestion.buildings import load_buildings_for_country
+
+    # Buffer covering the south-western corner of our two test tiles.
+    buffer_poly = Polygon(
+        [(36.80, -1.290), (36.83, -1.290), (36.83, -1.270), (36.80, -1.270)]
+    )
+    buffers_geo = gpd.GeoDataFrame(
+        {"_id": [1]}, geometry=[buffer_poly], crs="EPSG:4326"
+    )
+
+    # Two tiles: one inside the buffer, one outside.
+    inside = Polygon(
+        [(36.81, -1.281), (36.81, -1.279), (36.812, -1.279), (36.812, -1.281)]
+    )
+    outside = Polygon(
+        [(40.00, -3.00), (40.01, -3.00), (40.01, -2.99), (40.00, -2.99)]
+    )
+    inside_csv = (
+        'QuadKey,Location,geometry_wkt\n' + f'qk1,Kenya,"{inside.wkt}"\n'
+    )
+    outside_csv = (
+        'QuadKey,Location,geometry_wkt\n' + f'qk2,Kenya,"{outside.wkt}"\n'
+    )
+    inside_tile = gzip.compress(inside_csv.encode("utf-8"))
+    outside_tile = gzip.compress(outside_csv.encode("utf-8"))
+
+    custom_cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+
+    # Index advertises both quadkeys for Kenya.
+    index_csv = (
+        "Location,QuadKey,Url\n"
+        "Kenya,qk1,https://example/inside.csv.gz\n"
+        "Kenya,qk2,https://example/outside.csv.gz\n"
+    )
+    index_response = MagicMock()
+    index_response.status_code = 200
+    index_response.content = index_csv.encode("utf-8")
+    index_response.raise_for_status.return_value = None
+
+    inside_response = MagicMock()
+    inside_response.status_code = 200
+    inside_response.content = inside_tile
+    inside_response.raise_for_status.return_value = None
+
+    outside_response = MagicMock()
+    outside_response.status_code = 200
+    outside_response.content = outside_tile
+    outside_response.raise_for_status.return_value = None
+
+    def get_side(url, **_kwargs):
+        if "dataset-links" in url or url.endswith(".csv"):
+            return index_response
+        if "inside" in url:
+            return inside_response
+        return outside_response
+
+    session = MagicMock()
+    session.get.side_effect = get_side
+
+    out = load_buildings_for_country(
+        buffers_geo,
+        config=custom_cfg,
+        country="Kenya",
+        session=session,
+        progress=False,
+    )
+
+    # Only the inside tile's footprint is retained.
+    assert len(out) == 1
+    assert (out["country"] == "Kenya").all()
+    # Cache file was written.
+    assert (custom_cfg.cache_dir / "ms_buildings_country_kenya.gpkg").exists()
 
 
 def test_rows_to_geodataframe_parses_geojson_string(cfg: Config) -> None:

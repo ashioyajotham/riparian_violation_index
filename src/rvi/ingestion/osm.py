@@ -116,35 +116,165 @@ def fetch_waterways_pbf(
     bbox: tuple[float, float, float, float] | None = None,
     waterway_types: Sequence[str] | None = None,
 ) -> gpd.GeoDataFrame:
-    """Read waterways from a Geofabrik ``.osm.pbf`` extract using ``pyrosm``.
+    """Read waterways from a Geofabrik ``.osm.pbf`` extract using ``osmium``.
 
-    ``pyrosm`` is an optional, heavy dependency (installed via the
-    ``national`` extra). It is imported lazily so the pilot pipeline does
-    not require it.
+    ``osmium`` (libosmium's Python bindings, installed via the ``national``
+    extra) is imported lazily so the pilot pipeline does not require it.
+    The function reads the PBF in a single streaming pass, materialises each
+    matching way's geometry via ``osmium.geom.WKTFactory``, and returns a
+    GeoDataFrame in the canonical schema documented at the top of this
+    module.
+
+    Parameters
+    ----------
+    pbf_path
+        Path to a ``.osm.pbf`` file (e.g. the Geofabrik Kenya extract).
+    bbox
+        Optional ``(west, south, east, north)`` filter applied after parsing.
+        We intentionally don't push the bbox into osmium itself — for a
+        country-sized PBF the speed-up is negligible and the post-filter is
+        easier to reason about.
     """
     cfg = config or get_config()
     types = tuple(waterway_types or cfg.waterway_types)
+    pbf_path = Path(pbf_path)
+    if not pbf_path.exists():
+        raise FileNotFoundError(f"PBF not found: {pbf_path}")
 
     try:
-        from pyrosm import OSM  # type: ignore[import-not-found]
-    except ImportError as exc:  # pragma: no cover
+        import osmium  # type: ignore[import-not-found]
+        from osmium.geom import WKTFactory  # type: ignore[import-not-found]
+        from shapely import wkt as _wkt
+    except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError(
-            "fetch_waterways_pbf requires the optional 'national' extra: "
-            "pip install -e \".[national]\""
+            'fetch_waterways_pbf requires the optional "national" extra: '
+            'pip install -e ".[national]"'
         ) from exc
 
-    logger.info("Reading PBF: %s", pbf_path)
-    osm = OSM(str(pbf_path), bounding_box=list(bbox) if bbox else None)
-    raw = osm.get_data_by_custom_criteria(
-        custom_filter={"waterway": list(types)},
-        filter_type="keep",
-        keep_nodes=False,
-        keep_ways=True,
-        keep_relations=True,
+    logger.info("Reading PBF: %s (%.1f MB)", pbf_path, pbf_path.stat().st_size / 1e6)
+    fact = WKTFactory()
+    type_set = set(types)
+
+    fp = (
+        osmium.FileProcessor(str(pbf_path))
+        .with_locations()
+        .with_filter(osmium.filter.KeyFilter("waterway"))
     )
-    if raw is None or raw.empty:
+
+    rows: list[dict[str, Any]] = []
+    way_count = 0
+    for obj in fp:
+        if not obj.is_way():
+            continue
+        way_count += 1
+        ww = obj.tags.get("waterway")
+        if ww not in type_set:
+            continue
+        try:
+            wkt_str = fact.create_linestring(obj)
+        except Exception as exc:  # incomplete way / closed ring / etc.
+            logger.debug("skip way %s: %s", obj.id, exc)
+            continue
+        if not wkt_str:
+            continue
+        try:
+            geom = _wkt.loads(wkt_str)
+        except Exception:
+            continue
+        if geom.is_empty:
+            continue
+        tags = obj.tags
+        rows.append(
+            {
+                "osm_id": str(obj.id),
+                "waterway": ww,
+                "name": tags.get("name"),
+                "name_local": tags.get("name:sw") or tags.get("name:en") or None,
+                "strahler": cfg.strahler_for_waterway(ww),
+                "geometry": geom,
+            }
+        )
+
+    logger.info(
+        "PBF parsed: %d ways inspected, %d retained (%s)",
+        way_count,
+        len(rows),
+        ", ".join(types),
+    )
+    if not rows:
         return _empty_waterways_gdf(cfg)
-    return _normalise_waterways(raw, cfg)
+
+    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=cfg.crs_geographic)
+    if bbox is not None:
+        from shapely.geometry import box
+
+        bbox_geom = box(*bbox)
+        gdf = gdf[gdf.geometry.intersects(bbox_geom)].copy()
+
+    return _annotate_lengths(gdf, cfg)
+
+
+def download_geofabrik_kenya_pbf(
+    *,
+    config: Config | None = None,
+    target_path: Path | None = None,
+    overwrite: bool = False,
+    session: requests.Session | None = None,
+    chunk_size: int = 1 << 20,  # 1 MiB
+    progress: bool = True,
+) -> Path:
+    """Download the Geofabrik Kenya PBF (~317 MB), cached on disk.
+
+    The file is streamed to disk so it never has to fit in memory. By
+    default the destination is ``cfg.cache_dir / "kenya-latest.osm.pbf"``;
+    pass ``target_path=`` to override.
+    """
+    cfg = config or get_config()
+    cfg.ensure_dirs()
+    target_path = Path(target_path) if target_path else cfg.cache_dir / "kenya-latest.osm.pbf"
+
+    if target_path.exists() and not overwrite:
+        logger.info(
+            "Geofabrik Kenya PBF already cached: %s (%.1f MB)",
+            target_path,
+            target_path.stat().st_size / 1e6,
+        )
+        return target_path
+
+    sess = session or requests.Session()
+    sess.headers.setdefault("User-Agent", cfg.user_agent)
+
+    url = cfg.geofabrik_kenya_pbf_url
+    logger.info("Downloading Geofabrik Kenya PBF: %s -> %s", url, target_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target_path.with_suffix(target_path.suffix + ".part")
+
+    with sess.get(url, stream=True, timeout=cfg.request_timeout_s) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("Content-Length", "0")) or None
+        bar = None
+        if progress:
+            try:
+                from tqdm import tqdm
+
+                bar = tqdm(
+                    total=total, unit="B", unit_scale=True, desc="Geofabrik Kenya PBF"
+                )
+            except ImportError:  # pragma: no cover
+                bar = None
+        with tmp.open("wb") as fh:
+            for chunk in resp.iter_content(chunk_size=chunk_size):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                if bar is not None:
+                    bar.update(len(chunk))
+        if bar is not None:
+            bar.close()
+
+    tmp.replace(target_path)
+    logger.info("Saved %s (%.1f MB)", target_path, target_path.stat().st_size / 1e6)
+    return target_path
 
 
 # ---------------------------------------------------------------------------
@@ -303,58 +433,6 @@ WATERWAY_COLUMNS: tuple[str, ...] = (
 )
 
 
-def _normalise_waterways(raw: gpd.GeoDataFrame, cfg: Config) -> gpd.GeoDataFrame:
-    """Coerce a pyrosm-derived GeoDataFrame into the canonical RVI schema."""
-    df = raw.copy()
-    if "id" in df.columns and "osm_id" not in df.columns:
-        df["osm_id"] = df["id"]
-    if "osm_id" not in df.columns:
-        df["osm_id"] = pd.Series(range(len(df)), index=df.index).astype(str)
-
-    df["osm_id"] = df["osm_id"].astype(str)
-
-    if "tags" in df.columns:
-        # pyrosm packs less-common tags into a JSON-like 'tags' dict column.
-        df["name_local"] = df.apply(_extract_name_local, axis=1)
-    else:
-        df["name_local"] = df.get("name:sw")
-
-    if "waterway" not in df.columns:
-        raise ValueError("PBF result is missing the 'waterway' column")
-
-    df["strahler"] = df["waterway"].map(cfg.strahler_for_waterway).fillna(1).astype(int)
-
-    df = df.rename(columns={"geom": "geometry"} if "geom" in df.columns else {})
-    if df.geometry.crs is None:
-        df = df.set_crs(cfg.crs_geographic)
-
-    df = df[df.geometry.notna()].copy()
-    df = df[df["waterway"].isin(cfg.waterway_types)].copy()
-
-    keep = [c for c in ("osm_id", "waterway", "name", "name_local", "strahler") if c in df.columns]
-    df = df[[*keep, "geometry"]]
-    if "name" not in df.columns:
-        df["name"] = None
-    if "name_local" not in df.columns:
-        df["name_local"] = None
-
-    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs=df.crs or cfg.crs_geographic)
-    return _annotate_lengths(gdf, cfg)
-
-
-def _extract_name_local(row: pd.Series) -> Any:
-    tags = row.get("tags")
-    if isinstance(tags, dict):
-        return tags.get("name:sw") or tags.get("name:en")
-    if isinstance(tags, str):
-        # Pyrosm sometimes returns tags as a "k=>v;k=>v" string. Best-effort parse.
-        for chunk in tags.split(","):
-            if "name:sw" in chunk:
-                _, _, v = chunk.partition("=>")
-                return v.strip().strip('"') or None
-    return None
-
-
 def _annotate_lengths(gdf: gpd.GeoDataFrame, cfg: Config) -> gpd.GeoDataFrame:
     """Add an accurate ``length_m`` column computed in metric CRS."""
     if gdf.empty:
@@ -393,6 +471,7 @@ def load_waterways(path: Path, *, layer: str = "waterways") -> gpd.GeoDataFrame:
 __all__ = [
     "WATERWAY_COLUMNS",
     "build_overpass_query",
+    "download_geofabrik_kenya_pbf",
     "fetch_waterways_overpass",
     "fetch_waterways_pbf",
     "load_waterways",

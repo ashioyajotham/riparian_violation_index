@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 
 import click
 
@@ -119,22 +118,93 @@ def pilot(area: str, bbox: str | None, skip_buildings: bool, skip_floodhub: bool
     default=None,
     help="Path to a Geofabrik Kenya PBF (downloaded if absent).",
 )
-def national(pbf_path: str | None) -> None:
-    """Run the country-wide pipeline. Requires the `national` extra."""
+@click.option(
+    "--bbox",
+    type=str,
+    default=None,
+    help='Restrict the PBF parse to a bbox: "west,south,east,north" (EPSG:4326).',
+)
+@click.option(
+    "--run-name",
+    default="national",
+    show_default=True,
+    help="Output sub-directory under outputs/.",
+)
+@click.option(
+    "--skip-buildings",
+    is_flag=True,
+    help="Do not stream Microsoft footprints (smoke test only).",
+)
+@click.option(
+    "--skip-floodhub",
+    is_flag=True,
+    help="Do not call Google Flood Hub (validation step is skipped).",
+)
+@click.option(
+    "--skip-counties",
+    is_flag=True,
+    help="Do not download GADM counties or build the choropleth.",
+)
+def national(
+    pbf_path: str | None,
+    bbox: str | None,
+    run_name: str,
+    skip_buildings: bool,
+    skip_floodhub: bool,
+    skip_counties: bool,
+) -> None:
+    """Run the country-scale pipeline (proposal \u00a78 Phase 1)."""
     try:
-        from rvi.ingestion.buildings import stream_buildings_duckdb  # noqa: F401
-        from rvi.ingestion.osm import fetch_waterways_pbf  # noqa: F401
+        import osmium  # noqa: F401
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise click.ClickException(
             'national run requires the "national" extra: '
             'pip install -e ".[national]"'
         ) from exc
 
-    click.echo("National-scale runs are heavy (PBF + 15M Microsoft footprints).")
-    click.echo("Implemented as documented in §5.4 of the proposal.")
-    click.echo("This entry point is the operational scaffold; configure the run")
-    click.echo("via .env and invoke from a notebook or a custom script.")
-    sys.exit(0)
+    from pathlib import Path as _P
+
+    from rvi.pipeline import run_national
+
+    cfg = get_config()
+
+    box: tuple[float, float, float, float] | None = None
+    if bbox:
+        try:
+            west, south, east, north = (float(x) for x in bbox.split(","))
+            box = (west, south, east, north)
+        except (TypeError, ValueError) as exc:
+            raise click.UsageError(
+                'bbox must be "west,south,east,north" floats'
+            ) from exc
+
+    result = run_national(
+        config=cfg,
+        pbf_path=_P(pbf_path) if pbf_path else None,
+        run_name=run_name,
+        bbox=box,
+        skip_buildings=skip_buildings,
+        skip_floodhub=skip_floodhub,
+        skip_counties=skip_counties,
+    )
+
+    click.echo(f"Run directory: {result.run_dir}")
+    if result.choropleth_path is not None:
+        click.echo(f"County choropleth: {result.choropleth_path}")
+    if result.map_path is not None:
+        click.echo(f"Segment map: {result.map_path}")
+    if result.correlation:
+        click.echo(
+            "\nCorrelation (Spearman \u03c1 \u2014 upstream RVI vs Flood Hub severity):"
+        )
+        for k, v in result.correlation.items():
+            click.echo(
+                f"  {k:>32s}: \u03c1={v.rho:+.3f}, n={v.n}, "
+                f"95%CI=[{v.ci_low:+.3f}, {v.ci_high:+.3f}], p={v.pvalue:.3g}"
+            )
+    else:
+        click.echo("Validation skipped or no Flood Hub data available.")
+    click.echo(f"\nManifest: {result.manifest_path}")
 
 
 @main.command()

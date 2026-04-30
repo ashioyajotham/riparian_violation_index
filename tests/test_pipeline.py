@@ -1,4 +1,9 @@
-"""End-to-end integration test for ``rvi.pipeline.run_pilot`` (offline)."""
+"""End-to-end integration tests for ``rvi.pipeline`` (offline).
+
+Both ``run_pilot`` and ``run_national`` are exercised here; network calls
+(Overpass, Flood Hub, GADM, Microsoft tiles) are patched so the suite stays
+hermetic.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from unittest.mock import patch
 import geopandas as gpd
 
 from rvi.config import Config
-from rvi.pipeline import run_pilot
+from rvi.pipeline import run_national, run_pilot
 
 
 def _patched_overpass(payload: dict[str, Any]):
@@ -101,5 +106,135 @@ def test_run_pilot_with_skip_buildings_zero_rvi(
     rvi_gdf = gpd.read_file(result.rvi_segments_path)
     composite_cols = [c for c in rvi_gdf.columns if c.startswith("rvi_composite_")]
     assert composite_cols, "expected at least one rvi_composite_*m column"
+    for col in composite_cols:
+        assert (rvi_gdf[col].fillna(0) == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# run_national
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_counties_geo() -> gpd.GeoDataFrame:
+    """Two synthetic counties roughly covering the Nairobi-pilot bbox."""
+    from shapely.geometry import box
+
+    return gpd.GeoDataFrame(
+        {
+            "county_id": ["KEN.1_1", "KEN.2_1"],
+            "county": ["Nairobi", "Kiambu"],
+            "iso_code": ["KE.NR", "KE.KI"],
+        },
+        geometry=[
+            box(36.65, -1.45, 36.90, -1.15),
+            box(36.90, -1.45, 37.10, -1.15),
+        ],
+        crs="EPSG:4326",
+    )
+
+
+def test_run_national_smoke_with_injected_inputs(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    """run_national must work end-to-end when waterways/buildings/counties are
+    injected (no PBF, no Microsoft download, no Flood Hub network)."""
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+        bootstrap_iterations=10,
+    )
+
+    waterways_geo = waterways_metric.to_crs("EPSG:4326")
+    buildings_geo = buildings_metric.to_crs("EPSG:4326")
+    counties_geo = _synthetic_counties_geo()
+
+    with patch(
+        "rvi.pipeline.download_kenya_counties", return_value=counties_geo
+    ):
+        result = run_national(
+            config=cfg,
+            run_name="nat_smoke",
+            waterways=waterways_geo,
+            buildings=buildings_geo,
+            skip_floodhub=True,
+        )
+
+    assert result.run_dir.exists()
+    assert result.manifest_path.exists()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["phase"] == "1-national"
+    assert manifest["waterways_count"] == len(waterways_geo)
+    assert manifest["segments_count"] > 0
+    assert manifest["buildings_count"] == len(buildings_geo)
+    assert manifest["correlation"] == {}
+
+    # Core artefacts exist.
+    assert result.waterways_path.exists()
+    assert result.segments_path.exists()
+    assert result.rvi_segments_path.exists()
+    # County choropleth + counties GPKG written.
+    assert result.choropleth_path is not None and result.choropleth_path.exists()
+    assert result.counties_path is not None and result.counties_path.exists()
+
+
+def test_run_national_skip_counties(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    """--skip-counties suppresses GADM download and choropleth output."""
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+
+    with patch("rvi.pipeline.download_kenya_counties") as gadm_mock:
+        result = run_national(
+            config=cfg,
+            run_name="nat_no_counties",
+            waterways=waterways_metric.to_crs("EPSG:4326"),
+            buildings=buildings_metric.to_crs("EPSG:4326"),
+            skip_floodhub=True,
+            skip_counties=True,
+        )
+
+    gadm_mock.assert_not_called()
+    assert result.choropleth_path is None
+    assert result.counties_path is None
+    assert result.rvi_segments_path.exists()
+
+
+def test_run_national_skip_buildings_yields_zero_rvi(
+    waterways_metric: gpd.GeoDataFrame, tmp_path
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+
+    result = run_national(
+        config=cfg,
+        run_name="nat_no_bld",
+        waterways=waterways_metric.to_crs("EPSG:4326"),
+        skip_buildings=True,
+        skip_floodhub=True,
+        skip_counties=True,
+    )
+    rvi_gdf = gpd.read_file(result.rvi_segments_path)
+    composite_cols = [c for c in rvi_gdf.columns if c.startswith("rvi_composite_")]
     for col in composite_cols:
         assert (rvi_gdf[col].fillna(0) == 0).all()

@@ -229,6 +229,125 @@ def load_buildings_for_bbox(
 # ---------------------------------------------------------------------------
 
 
+def load_buildings_for_country(
+    waterway_buffers: gpd.GeoDataFrame,
+    *,
+    config: Config | None = None,
+    country: str = "Kenya",
+    index_url: str | None = None,
+    cache_path: Path | None = None,
+    overwrite: bool = False,
+    session: requests.Session | None = None,
+    progress: bool = True,
+) -> gpd.GeoDataFrame:
+    """Stream every Microsoft tile for a country and keep only footprints
+    intersecting the waterway-buffer union.
+
+    This is the path used by the national-scale run. The function downloads
+    each tile in turn, parses it (CSV or GeoJSONL — see :func:`_parse_tile_text`),
+    and spatially joins the tile against the buffer GeoDataFrame *immediately*
+    so we never hold more than one tile's worth of buildings in memory.
+
+    Filtering at the tile boundary takes the dataset from ~15 M Kenyan
+    footprints down to ~1–2 M (anything within the 30 m + Strahler buffer
+    of any waterway in Kenya), which fits comfortably in memory.
+    """
+    cfg = config or get_config()
+    cfg.ensure_dirs()
+    cache_path = (
+        Path(cache_path)
+        if cache_path is not None
+        else cfg.cache_dir / f"ms_buildings_country_{country.lower()}.gpkg"
+    )
+    if cache_path.exists() and not overwrite:
+        logger.info("Using cached country-scale buildings: %s", cache_path)
+        return gpd.read_file(cache_path)
+
+    if waterway_buffers.empty:
+        logger.warning("waterway_buffers is empty; nothing to filter against")
+        return _empty_buildings_gdf(cfg)
+
+    sess = session or requests.Session()
+    sess.headers.setdefault("User-Agent", cfg.user_agent)
+
+    index_df = _fetch_buildings_index(cfg=cfg, sess=sess, override_url=index_url)
+    country_rows = index_df[
+        index_df["Location"].astype(str).str.lower() == country.lower()
+    ].copy()
+    if country_rows.empty:
+        raise ValueError(
+            f"Microsoft buildings index has no rows for country={country!r}"
+        )
+
+    # Reproject buffers to EPSG:4326 once so the per-tile sjoin is cheap.
+    buffers_geo = (
+        waterway_buffers.to_crs(cfg.crs_geographic)
+        if waterway_buffers.crs and waterway_buffers.crs != cfg.crs_geographic
+        else waterway_buffers
+    )
+    buffers_geo = gpd.GeoDataFrame(
+        {"_buffer_idx": range(len(buffers_geo))},
+        geometry=buffers_geo.geometry.values,
+        crs=cfg.crs_geographic,
+    )
+
+    iterator: Iterable[tuple[Any, pd.Series]] = country_rows.iterrows()
+    if progress:
+        try:
+            from tqdm import tqdm
+
+            iterator = tqdm(
+                iterator,
+                total=len(country_rows),
+                desc=f"MS tiles ({country})",
+                unit="tile",
+            )
+        except ImportError:  # pragma: no cover
+            pass
+
+    qk_col = _find_index_quadkey_column(country_rows)
+    frames: list[gpd.GeoDataFrame] = []
+    total_inspected = 0
+    total_kept = 0
+    for _, row in iterator:
+        url = str(row["Url"])
+        tile = _download_and_parse_tile(url, sess=sess, cfg=cfg)
+        if tile.empty:
+            continue
+        total_inspected += len(tile)
+        # Per-tile spatial filter against the buffer union.
+        joined = gpd.sjoin(
+            tile[["geometry"]], buffers_geo, how="inner", predicate="intersects"
+        )
+        if joined.empty:
+            continue
+        kept = tile.loc[joined.index.unique()].copy()
+        kept["country"] = country
+        kept["quadkey"] = str(row[qk_col])
+        total_kept += len(kept)
+        frames.append(kept)
+
+    logger.info(
+        "Country-scale build: inspected %d footprints, kept %d after buffer filter",
+        total_inspected,
+        total_kept,
+    )
+
+    if not frames:
+        return _empty_buildings_gdf(cfg)
+
+    out = pd.concat(frames, ignore_index=True)
+    out = gpd.GeoDataFrame(out, geometry="geometry", crs=cfg.crs_geographic)
+    # Re-id globally; per-tile building_id collides across tiles.
+    out["building_id"] = pd.RangeIndex(start=1, stop=len(out) + 1)
+    out = _annotate_areas(out, cfg)
+
+    from rvi.io import write_geopackage
+
+    write_geopackage(out, cache_path)
+    return out
+
+
 def stream_buildings_duckdb(
     waterway_buffers: gpd.GeoDataFrame,
     *,
@@ -627,6 +746,7 @@ __all__ = [
     "BUILDINGS_COLUMNS",
     "buildings_iter",
     "load_buildings_for_bbox",
+    "load_buildings_for_country",
     "lonlat_to_tile",
     "quadkeys_for_bbox",
     "stream_buildings_duckdb",

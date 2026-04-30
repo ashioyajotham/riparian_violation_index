@@ -68,8 +68,11 @@ rvi-kenya/
 
 ### 1. Install
 
-The pilot pipeline runs lean. The `national` extra adds heavier dependencies
-(`pyrosm`, `pysheds`, `rasterio`) used only for the country-wide run.
+The pilot pipeline runs lean. The `national` extra adds the `osmium` PBF
+reader for country-wide waterway ingestion; the `phase2` extra adds the
+DEM / catchment-delineation stack (`pysheds`, `rasterio`, `rioxarray`)
+used to replace the Phase-1 Euclidean upstream radius with hydrologically
+correct catchment polygons.
 
 ```bash
 python -m venv .venv
@@ -78,8 +81,9 @@ python -m venv .venv
 # bash / zsh
 source .venv/bin/activate
 
-pip install -e ".[dev]"             # pilot + dev tools
-pip install -e ".[dev,national]"    # add national-scale extras
+pip install -e ".[dev]"                       # pilot + dev tools
+pip install -e ".[dev,national]"              # + Geofabrik PBF support
+pip install -e ".[dev,national,phase2]"       # + DEM catchment delineation
 ```
 
 ### 2. Configure

@@ -54,9 +54,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# National-scale ingestion: PBF reading & DEM-based catchment delineation.
+# National-scale ingestion: PBF reading via osmium (libosmium bindings,
+# actively maintained, ships Windows wheels). pyrosm was the original choice
+# but its build chain (pyrobuf) is incompatible with modern setuptools and
+# Python >= 3.12.
 national = [
-    "pyrosm>=0.6.2",
+    "osmium>=4.0",
+]
+
+# Phase 2 (proposal §5.5) — DEM-driven catchment delineation. Heavy stack
+# (numba, scikit-image, rasterio); kept separate so Phase 1 stays lean.
+phase2 = [
     "pysheds>=0.4",
     "rasterio>=1.3",
     "rioxarray>=0.15",
