@@ -1,0 +1,147 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rvi-kenya"
+version = "0.1.0"
+description = "Riparian Violation Index for Kenya: a computational pipeline quantifying riparian encroachment from open geospatial data and validating it against Google Flood Hub severity."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Victor Ashioya" },
+]
+keywords = [
+    "geospatial",
+    "flood-risk",
+    "riparian",
+    "kenya",
+    "openstreetmap",
+    "google-flood-hub",
+    "remote-sensing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Hydrology",
+]
+
+# Core runtime dependencies. Heavy/optional ones (pyrosm, pysheds, rasterio)
+# are kept in the `national` extra so the pilot can be installed lean.
+dependencies = [
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "folium>=0.15",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+    "duckdb>=0.10",
+    "pyarrow>=14.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+# National-scale ingestion: PBF reading & DEM-based catchment delineation.
+national = [
+    "pyrosm>=0.6.2",
+    "pysheds>=0.4",
+    "rasterio>=1.3",
+    "rioxarray>=0.15",
+]
+
+# Development / test environment.
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "ipykernel>=6.29",
+    "jupyterlab>=4.0",
+    "responses>=0.25",
+]
+
+[project.scripts]
+rvi = "rvi.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ashioyajotham/rvi-kenya"
+Repository = "https://github.com/ashioyajotham/rvi-kenya"
+Issues = "https://github.com/ashioyajotham/rvi-kenya/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rvi = ["py.typed"]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "B008",   # function calls in defaults are fine for click
+    # Allow Greek letters and typographic dashes that match the proposal's
+    # scientific notation (ρ, α, β, γ, ×, –). These are intentional, not bugs.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+"notebooks/**" = ["E402", "F401"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "network: marks tests that require network access",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyproj.*",
+    "ignore::UserWarning:geopandas.*",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
