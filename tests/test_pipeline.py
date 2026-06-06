@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import geopandas as gpd
+import pandas as pd
 
+from rvi.ingestion.floodhub import FloodStatus, Gauge, Severity, gauges_to_geodataframe, statuses_to_dataframe
 from rvi.config import Config
 from rvi.pipeline import run_national, run_pilot
 
@@ -143,6 +146,48 @@ def _synthetic_counties_geo() -> gpd.GeoDataFrame:
     )
 
 
+def _synthetic_gauges_and_statuses() -> tuple[gpd.GeoDataFrame, pd.DataFrame]:
+    gauges_geo = gauges_to_geodataframe(
+        [
+            Gauge(
+                gauge_id="g1",
+                latitude=-1.28,
+                longitude=36.83,
+                quality_verified=True,
+            ),
+            Gauge(
+                gauge_id="g2",
+                latitude=-0.50,
+                longitude=37.00,
+                quality_verified=False,
+            ),
+        ]
+    )
+    statuses_df = statuses_to_dataframe(
+        [
+            FloodStatus(gauge_id="g1", severity=Severity.SEVERE),
+            FloodStatus(gauge_id="g2", severity=Severity.NO_FLOODING),
+        ]
+    )
+    return gauges_geo, statuses_df
+
+
+def _synthetic_catchments_geo() -> gpd.GeoDataFrame:
+    from shapely.geometry import box
+
+    return gpd.GeoDataFrame(
+        {
+            "gauge_id": ["g1", "g2"],
+            "geometry": [
+                box(36.79, -1.31, 36.85, -1.26),
+                box(37.30, -0.60, 37.50, -0.40),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+
 def test_run_national_smoke_with_injected_inputs(
     waterways_metric: gpd.GeoDataFrame,
     buildings_metric: gpd.GeoDataFrame,
@@ -263,3 +308,143 @@ def test_run_national_skip_buildings_yields_zero_rvi(
     composite_cols = [c for c in rvi_gdf.columns if c.startswith("rvi_composite_")]
     for col in composite_cols:
         assert (rvi_gdf[col].fillna(0) == 0).all()
+
+
+def test_run_pilot_uses_catchment_validation_when_supplied(
+    overpass_response: dict[str, Any],
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+        bootstrap_iterations=10,
+    )
+    from rvi.ingestion.osm import parse_overpass_response
+
+    wgdf = parse_overpass_response(overpass_response, config=cfg)
+    gauges_geo, statuses_df = _synthetic_gauges_and_statuses()
+    catchments_geo = _synthetic_catchments_geo()
+
+    mock_client = MagicMock()
+    mock_client.search_gauges_by_area.return_value = [
+        Gauge(gauge_id="g1", latitude=-1.28, longitude=36.83, quality_verified=True),
+        Gauge(gauge_id="g2", latitude=-0.50, longitude=37.00, quality_verified=False),
+    ]
+    mock_client.search_latest_flood_status_by_area.return_value = [
+        FloodStatus(gauge_id="g1", severity=Severity.SEVERE),
+        FloodStatus(gauge_id="g2", severity=Severity.NO_FLOODING),
+    ]
+
+    with (
+        patch("rvi.pipeline.fetch_waterways_overpass", return_value=wgdf),
+        patch("rvi.pipeline.FloodHubClient", return_value=mock_client),
+    ):
+        result = run_pilot(
+            config=cfg,
+            run_name="catchment_smoke",
+            buildings=buildings_metric,
+            catchments=catchments_geo,
+        )
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["validation_mode"] == "catchment"
+    assert result.correlation
+    upstream_30 = result.upstream_paths[30.0]
+    upstream = pd.read_csv(upstream_30)
+    assert int(upstream.loc[upstream["gauge_id"] == "g1", "n_upstream_segments"].iloc[0]) > 0
+
+
+def test_run_national_uses_catchment_validation_when_supplied(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+        bootstrap_iterations=10,
+    )
+    counties_geo = _synthetic_counties_geo()
+    catchments_geo = _synthetic_catchments_geo()
+
+    mock_client = MagicMock()
+    mock_client.search_gauges_by_area.return_value = [
+        Gauge(gauge_id="g1", latitude=-1.28, longitude=36.83, quality_verified=True),
+        Gauge(gauge_id="g2", latitude=-0.50, longitude=37.00, quality_verified=False),
+    ]
+    mock_client.search_latest_flood_status_by_area.return_value = [
+        FloodStatus(gauge_id="g1", severity=Severity.SEVERE),
+        FloodStatus(gauge_id="g2", severity=Severity.NO_FLOODING),
+    ]
+
+    with (
+        patch("rvi.pipeline.download_kenya_counties", return_value=counties_geo),
+        patch("rvi.pipeline.FloodHubClient", return_value=mock_client),
+    ):
+        result = run_national(
+            config=cfg,
+            run_name="nat_catchment_smoke",
+            waterways=waterways_metric.to_crs("EPSG:4326"),
+            buildings=buildings_metric.to_crs("EPSG:4326"),
+            catchments=catchments_geo,
+        )
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["validation_mode"] == "catchment"
+    assert result.correlation
+
+
+def test_run_pilot_uses_dem_to_generate_catchments(
+    overpass_response: dict[str, Any],
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+        bootstrap_iterations=10,
+    )
+    from rvi.ingestion.osm import parse_overpass_response
+
+    wgdf = parse_overpass_response(overpass_response, config=cfg)
+    catchments_geo = _synthetic_catchments_geo()
+
+    mock_client = MagicMock()
+    mock_client.search_gauges_by_area.return_value = [
+        Gauge(gauge_id="g1", latitude=-1.28, longitude=36.83, quality_verified=True),
+        Gauge(gauge_id="g2", latitude=-0.50, longitude=37.00, quality_verified=False),
+    ]
+    mock_client.search_latest_flood_status_by_area.return_value = [
+        FloodStatus(gauge_id="g1", severity=Severity.SEVERE),
+        FloodStatus(gauge_id="g2", severity=Severity.NO_FLOODING),
+    ]
+
+    with (
+        patch("rvi.pipeline.fetch_waterways_overpass", return_value=wgdf),
+        patch("rvi.pipeline.FloodHubClient", return_value=mock_client),
+        patch("rvi.pipeline.delineate_catchments_from_dem", return_value=catchments_geo) as dem_mock,
+    ):
+        result = run_pilot(
+            config=cfg,
+            run_name="dem_catchment_smoke",
+            buildings=buildings_metric,
+            dem_path=tmp_path / "fake_dem.tif",
+        )
+
+    dem_mock.assert_called_once()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["validation_mode"] == "dem_catchment"
+    assert result.correlation

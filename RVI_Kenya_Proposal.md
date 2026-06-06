@@ -457,10 +457,10 @@ The 75th percentile is the primary signal — it captures the worst-encroached p
 upstream catchment, which has the strongest hydraulic effect.
 
 **Phase 2 — Hydrologic catchment delineation (follow-on):** Phase 1's Euclidean radius is a
-coarse approximation of the true hydrologic upstream area. In Phase 2, the Copernicus DEM is
-used with `pysheds` to derive flow direction and flow accumulation rasters for Kenya, enabling
-true catchment polygon delineation per gauge. The Euclidean circle is replaced with the actual
-upstream drainage polygon.
+coarse approximation of the true hydrologic upstream area. The current implementation already
+accepts precomputed per-gauge catchment polygons and uses them in place of the Euclidean radius.
+The remaining automation step is to derive those polygons directly from the Copernicus DEM using
+`pysheds` flow direction and flow accumulation rasters for Kenya.
 
 **Statistical test:** Spearman's rank correlation is computed between `upstream_rvi_p75`
 (or mean/max) and `severity_int` for the set of gauges with sufficient upstream data. The test
@@ -494,7 +494,7 @@ alongside the correlation coefficient and p-value.
 | Catchment delineation | pysheds (Phase 2) | DEM-based flow routing for true catchments |
 | Visualisation | Folium ≥ 0.15 | Standalone HTML choropleth maps, no server needed |
 | Statistical analysis | scipy.stats | Spearman correlation, bootstrap CI |
-| Testing | pytest ≥ 8.0, pytest-mock ≥ 3.12 | 127 tests passing across all modules |
+| Testing | pytest ≥ 8.0, pytest-mock ≥ 3.12 | 131 tests passing across all modules |
 | Configuration | python-dotenv | `.env`-based API key and parameter management |
 
 All dependencies are specified in `pyproject.toml`. The full pipeline runs on a standard laptop

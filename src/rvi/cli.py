@@ -72,12 +72,36 @@ def main(ctx: click.Context, verbose: bool) -> None:
     is_flag=True,
     help="Do not call Google Flood Hub (validation step is skipped).",
 )
-def pilot(area: str, bbox: str | None, skip_buildings: bool, skip_floodhub: bool) -> None:
+@click.option(
+    "--catchments",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to precomputed gauge catchment polygons (Phase 2 validation).",
+)
+@click.option(
+    "--dem",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a DEM raster used to generate catchments automatically.",
+)
+def pilot(
+    area: str,
+    bbox: str | None,
+    skip_buildings: bool,
+    skip_floodhub: bool,
+    catchments: str | None,
+    dem: str | None,
+) -> None:
     """Run the Nairobi pilot pipeline (or any small bbox)."""
+    from pathlib import Path as _P
+
+    import geopandas as gpd
+
     from rvi.pipeline import run_pilot
 
     cfg = get_config()
     box: tuple[float, float, float, float] | None = None
+    catchments_gdf = gpd.read_file(catchments) if catchments else None
     if bbox:
         try:
             west, south, east, north = (float(x) for x in bbox.split(","))
@@ -93,6 +117,8 @@ def pilot(area: str, bbox: str | None, skip_buildings: bool, skip_floodhub: bool
         run_name=f"{area}_pilot",
         skip_buildings=skip_buildings,
         skip_floodhub=skip_floodhub,
+        catchments=catchments_gdf,
+        dem_path=_P(dem) if dem else None,
     )
 
     click.echo(f"Run directory: {result.run_dir}")
@@ -145,6 +171,18 @@ def pilot(area: str, bbox: str | None, skip_buildings: bool, skip_floodhub: bool
     is_flag=True,
     help="Do not download GADM counties or build the choropleth.",
 )
+@click.option(
+    "--catchments",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to precomputed gauge catchment polygons (Phase 2 validation).",
+)
+@click.option(
+    "--dem",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a DEM raster used to generate catchments automatically.",
+)
 def national(
     pbf_path: str | None,
     bbox: str | None,
@@ -152,6 +190,8 @@ def national(
     skip_buildings: bool,
     skip_floodhub: bool,
     skip_counties: bool,
+    catchments: str | None,
+    dem: str | None,
 ) -> None:
     """Run the country-scale pipeline (proposal \u00a78 Phase 1)."""
     try:
@@ -164,11 +204,14 @@ def national(
 
     from pathlib import Path as _P
 
+    import geopandas as gpd
+
     from rvi.pipeline import run_national
 
     cfg = get_config()
 
     box: tuple[float, float, float, float] | None = None
+    catchments_gdf = gpd.read_file(catchments) if catchments else None
     if bbox:
         try:
             west, south, east, north = (float(x) for x in bbox.split(","))
@@ -186,6 +229,8 @@ def national(
         skip_buildings=skip_buildings,
         skip_floodhub=skip_floodhub,
         skip_counties=skip_counties,
+        catchments=catchments_gdf,
+        dem_path=_P(dem) if dem else None,
     )
 
     click.echo(f"Run directory: {result.run_dir}")

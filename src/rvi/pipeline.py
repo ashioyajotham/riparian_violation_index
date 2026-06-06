@@ -34,6 +34,7 @@ from rvi.analysis.encroachment import detect_encroachment_multi
 from rvi.analysis.rvi import compute_rvi, compute_rvi_multi, sensitivity_grid
 from rvi.analysis.validation import (
     SpearmanResult,
+    aggregate_upstream_catchment,
     aggregate_upstream_euclidean,
     correlate_upstream_rvi_to_severity,
     stratified_correlation,
@@ -55,6 +56,7 @@ from rvi.ingestion.osm import (
     fetch_waterways_pbf,
 )
 from rvi.io import write_geopackage
+from rvi.terrain.catchments import delineate_catchments_from_dem
 from rvi.viz.choropleth import (
     aggregate_rvi_by_county,
     county_choropleth,
@@ -103,6 +105,8 @@ def run_pilot(
     skip_buildings: bool = False,
     skip_floodhub: bool = False,
     buildings: gpd.GeoDataFrame | None = None,
+    catchments: gpd.GeoDataFrame | None = None,
+    dem_path: Path | None = None,
 ) -> PilotResult:
     """Run the full pilot pipeline end-to-end.
 
@@ -136,6 +140,13 @@ def run_pilot(
         "upstream_radius_m": cfg.upstream_radius_m,
         "skip_buildings": skip_buildings,
         "skip_floodhub": skip_floodhub,
+        "validation_mode": (
+            "catchment"
+            if catchments is not None
+            else "dem_catchment"
+            if dem_path is not None
+            else "euclidean"
+        ),
     }
 
     # 1) Waterways ----------------------------------------------------------
@@ -215,13 +226,30 @@ def run_pilot(
         except FloodHubError as exc:
             logger.warning("Flood Hub unavailable (%s); skipping validation.", exc)
 
+    generated_catchments = catchments
+    if generated_catchments is None and dem_path is not None and gauges_geo is not None:
+        generated_catchments = delineate_catchments_from_dem(
+            gauges_geo,
+            dem_path,
+            output_crs=cfg.crs_geographic,
+            config=cfg,
+        )
+
     if gauges_geo is not None and not gauges_geo.empty and statuses_df is not None:
         gauges_with_status = join_gauges_with_status(gauges_geo, statuses_df)
         for width in cfg.buffer_widths_m:
             scored = compute_rvi(enc_by_width[float(width)], config=cfg)
-            upstream = aggregate_upstream_euclidean(
-                scored, gauges_with_status, config=cfg
-            )
+            if generated_catchments is not None:
+                upstream = aggregate_upstream_catchment(
+                    scored,
+                    gauges_with_status,
+                    catchments=generated_catchments,
+                    config=cfg,
+                )
+            else:
+                upstream = aggregate_upstream_euclidean(
+                    scored, gauges_with_status, config=cfg
+                )
             up_path = run_dir / f"upstream_{int(width)}m.csv"
             upstream.to_csv(up_path, index=False)
             upstream_paths[float(width)] = up_path
@@ -336,6 +364,8 @@ def run_national(
     skip_counties: bool = False,
     waterways: gpd.GeoDataFrame | None = None,
     buildings: gpd.GeoDataFrame | None = None,
+    catchments: gpd.GeoDataFrame | None = None,
+    dem_path: Path | None = None,
 ) -> NationalResult:
     """Run the country-scale Phase-1 pipeline (proposal §8 Phase 1).
 
@@ -378,6 +408,13 @@ def run_national(
         "skip_buildings": skip_buildings,
         "skip_floodhub": skip_floodhub,
         "skip_counties": skip_counties,
+        "validation_mode": (
+            "catchment"
+            if catchments is not None
+            else "dem_catchment"
+            if dem_path is not None
+            else "euclidean"
+        ),
     }
 
     # 1) Waterways ----------------------------------------------------------
@@ -467,13 +504,30 @@ def run_national(
         except FloodHubError as exc:
             logger.warning("Flood Hub unavailable (%s); skipping validation.", exc)
 
+    generated_catchments = catchments
+    if generated_catchments is None and dem_path is not None and gauges_geo is not None:
+        generated_catchments = delineate_catchments_from_dem(
+            gauges_geo,
+            dem_path,
+            output_crs=cfg.crs_geographic,
+            config=cfg,
+        )
+
     if gauges_geo is not None and not gauges_geo.empty and statuses_df is not None:
         gauges_with_status = join_gauges_with_status(gauges_geo, statuses_df)
         for width in cfg.buffer_widths_m:
             scored = compute_rvi(enc_by_width[float(width)], config=cfg)
-            upstream = aggregate_upstream_euclidean(
-                scored, gauges_with_status, config=cfg
-            )
+            if generated_catchments is not None:
+                upstream = aggregate_upstream_catchment(
+                    scored,
+                    gauges_with_status,
+                    catchments=generated_catchments,
+                    config=cfg,
+                )
+            else:
+                upstream = aggregate_upstream_euclidean(
+                    scored, gauges_with_status, config=cfg
+                )
             up_path = run_dir / f"upstream_{int(width)}m.csv"
             upstream.to_csv(up_path, index=False)
             upstream_paths[float(width)] = up_path

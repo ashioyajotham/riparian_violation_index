@@ -71,8 +71,10 @@ rvi-kenya/
 The pilot pipeline runs lean. The `national` extra adds the `osmium` PBF
 reader for country-wide waterway ingestion; the `phase2` extra adds the
 DEM / catchment-delineation stack (`pysheds`, `rasterio`, `rioxarray`)
-used to replace the Phase-1 Euclidean upstream radius with hydrologically
-correct catchment polygons.
+used for workflows that replace the Phase-1 Euclidean upstream radius with
+hydrologically correct catchment polygons. The current CLI accepts
+precomputed catchment polygons via `--catchments` and can derive them from
+a DEM via `--dem`.
 
 ```bash
 python -m venv .venv
@@ -103,6 +105,8 @@ pytest -m "not network"
 
 ```bash
 rvi pilot --area nairobi
+rvi pilot --area nairobi --catchments data/processed/gauge_catchments.gpkg
+rvi pilot --area nairobi --dem data/raw/copernicus_dem.tif
 ```
 
 This:
@@ -117,6 +121,8 @@ This:
 
 ```bash
 rvi national
+rvi national --catchments data/processed/gauge_catchments.gpkg
+rvi national --dem data/raw/copernicus_dem.tif
 ```
 
 Requires `pip install -e ".[national]"`. Streams the Geofabrik Kenya PBF and
