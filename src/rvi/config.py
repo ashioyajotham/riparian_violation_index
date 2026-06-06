@@ -133,8 +133,8 @@ class Config:
     crs_geographic: str = "EPSG:4326"
     """Geographic CRS used for ingestion (lat/lon)."""
 
-    crs_metric: str = "EPSG:32637"
-    """UTM zone 37N — covers all of Kenya. Required for metric buffers."""
+    crs_metric: str = "EPSG:32737"
+    """UTM zone 37S — appropriate for Nairobi and most Kenyan study areas."""
 
     # --- Riparian buffer widths (metres) -----------------------------------
     buffer_widths_m: tuple[int, int, int] = (6, 10, 30)

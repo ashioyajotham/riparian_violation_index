@@ -10,10 +10,16 @@ from __future__ import annotations
 # Force matplotlib to a non-interactive backend before any other module
 # imports it. Some Windows Python installs ship a broken Tk; Agg works
 # everywhere and never opens a display.
+import os
+from pathlib import Path
+from itertools import count
+
 import matplotlib
 
 matplotlib.use("Agg", force=True)
 
+import _pytest.pathlib as _pytest_pathlib
+import _pytest.tmpdir as _pytest_tmpdir
 from typing import Any
 
 import geopandas as gpd
@@ -23,13 +29,21 @@ from shapely.geometry import LineString, Point, Polygon, box
 
 from rvi.config import Config
 
+# Some Windows sandbox environments mark pytest's temporary root unreadable
+# during session teardown, even after the tests themselves have completed.
+# Disabling only the dead-symlink cleanup keeps tmp_path usable without
+# masking any test failures.
+_pytest_pathlib.cleanup_dead_symlinks = lambda _root: None
+_pytest_tmpdir.cleanup_dead_symlinks = lambda _root: None
+_TMP_COUNTER = count()
+
 # ---------------------------------------------------------------------------
-# Coordinates: the synthetic toy basin lives in central Nairobi (UTM 37N).
+# Coordinates: the synthetic toy basin lives in central Nairobi (UTM 37S).
 # Origin is chosen so the EPSG:4326 round-trip stays inside [-1.30°, -1.27°],
 # [36.80°, 36.84°], an area smaller than the pilot bbox.
 # ---------------------------------------------------------------------------
 
-# UTM 37N coordinates near Nairobi CBD.
+# UTM 37S coordinates near Nairobi CBD.
 ORIGIN_X = 250_000.0
 ORIGIN_Y = 9_855_000.0
 
@@ -38,6 +52,16 @@ ORIGIN_Y = 9_855_000.0
 def cfg() -> Config:
     """A baseline Config that does not consult the environment."""
     return Config()
+
+
+@pytest.fixture()
+def tmp_path() -> Path:
+    """Project-local temp dir that avoids tempfile/pytest tmpdir ACL issues."""
+    base = Path("outputs") / f"pytest-tmp-{os.getpid()}"
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"case-{next(_TMP_COUNTER):04d}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @pytest.fixture()
@@ -57,7 +81,7 @@ def _line_in_metric(*coords: tuple[float, float]) -> LineString:
 
 @pytest.fixture()
 def waterways_metric() -> gpd.GeoDataFrame:
-    """Two synthetic waterways in EPSG:32637 (UTM 37N).
+    """Two synthetic waterways in EPSG:32737 (UTM 37S).
 
     * a 2-km river running west-to-east at y=0  (strahler 4)
     * a 1-km stream running south-to-north at x=500 (strahler 2)
@@ -75,7 +99,7 @@ def waterways_metric() -> gpd.GeoDataFrame:
             "geometry": [river, stream],
         },
         geometry="geometry",
-        crs="EPSG:32637",
+        crs="EPSG:32737",
     )
 
 
@@ -128,7 +152,7 @@ def buildings_metric() -> gpd.GeoDataFrame:
             "geometry": geoms,
         },
         geometry="geometry",
-        crs="EPSG:32637",
+        crs="EPSG:32737",
     )
 
 
@@ -146,8 +170,8 @@ def empty_buildings() -> gpd.GeoDataFrame:
             "quadkey": pd.Series(dtype=str),
             "footprint_area_m2": pd.Series(dtype=float),
         },
-        geometry=gpd.GeoSeries([], crs="EPSG:32637"),
-        crs="EPSG:32637",
+        geometry=gpd.GeoSeries([], crs="EPSG:32737"),
+        crs="EPSG:32737",
     )
 
 
@@ -177,7 +201,7 @@ def gauges_metric() -> gpd.GeoDataFrame:
             "severity_int": [3, 1],
         },
         geometry=pts,
-        crs="EPSG:32637",
+        crs="EPSG:32737",
     )
 
 
@@ -241,5 +265,5 @@ def counties_metric() -> gpd.GeoDataFrame:
             "geometry": [nairobi, kiambu],
         },
         geometry="geometry",
-        crs="EPSG:32637",
+        crs="EPSG:32737",
     )

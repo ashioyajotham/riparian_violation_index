@@ -31,7 +31,7 @@ import geopandas as gpd
 import pandas as pd
 
 from rvi.analysis.encroachment import detect_encroachment_multi
-from rvi.analysis.rvi import compute_rvi, compute_rvi_multi
+from rvi.analysis.rvi import compute_rvi, compute_rvi_multi, sensitivity_grid
 from rvi.analysis.validation import (
     SpearmanResult,
     aggregate_upstream_euclidean,
@@ -60,6 +60,7 @@ from rvi.viz.choropleth import (
     county_choropleth,
     rvi_severity_scatter,
     segment_map,
+    sensitivity_heatmap,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,8 @@ class PilotResult:
     correlation: dict[str, SpearmanResult]
     upstream_paths: dict[float, Path]
     manifest_path: Path
+    sensitivity_path: Path | None = None
+    sensitivity_heatmap_path: Path | None = None
 
     def correlation_summary(self) -> dict[str, dict[str, float | int | str]]:
         return {k: v.as_dict() for k, v in self.correlation.items()}
@@ -228,7 +231,18 @@ def run_pilot(
             for tier_name, tier_res in stratified.items():
                 correlation[f"{int(width)}m_p75_{tier_name}"] = tier_res
 
-    # Map + scatter ---------------------------------------------------------
+    # Sensitivity + map + scatter ------------------------------------------
+    sensitivity_path: Path | None = None
+    sensitivity_heatmap_path: Path | None = None
+    primary_width = float(cfg.primary_buffer_m)
+    primary_enc = enc_by_width.get(primary_width)
+    if primary_enc is not None and not primary_enc.empty:
+        sens = sensitivity_grid(primary_enc, config=cfg)
+        sensitivity_path = run_dir / f"sensitivity_{int(primary_width)}m.csv"
+        sens.to_csv(sensitivity_path, index=False)
+        sensitivity_heatmap_path = run_dir / "rvi_sensitivity_analysis.png"
+        sensitivity_heatmap(sens, save_path=sensitivity_heatmap_path)
+
     map_path: Path | None = None
     if not rvi_segments.empty:
         col = (
@@ -258,8 +272,13 @@ def run_pilot(
             save_path=scatter_path,
         )
 
-    # Manifest --------------------------------------------------------------
-    manifest["correlation"] = {k: v.as_dict() for k, v in correlation.items()}
+    # Correlation + manifest -----------------------------------------------
+    correlation_payload = {k: v.as_dict() for k, v in correlation.items()}
+    (run_dir / "correlation.json").write_text(
+        json.dumps(correlation_payload, default=str, indent=2),
+        encoding="utf-8",
+    )
+    manifest["correlation"] = correlation_payload
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, default=str, indent=2),
@@ -275,6 +294,8 @@ def run_pilot(
         correlation=correlation,
         upstream_paths=upstream_paths,
         manifest_path=manifest_path,
+        sensitivity_path=sensitivity_path,
+        sensitivity_heatmap_path=sensitivity_heatmap_path,
     )
 
 
@@ -297,6 +318,8 @@ class NationalResult:
     correlation: dict[str, SpearmanResult]
     upstream_paths: dict[float, Path]
     manifest_path: Path
+    sensitivity_path: Path | None = None
+    sensitivity_heatmap_path: Path | None = None
 
     def correlation_summary(self) -> dict[str, dict[str, float | int | str]]:
         return {k: v.as_dict() for k, v in self.correlation.items()}
@@ -460,6 +483,17 @@ def run_national(
             for tier_name, tier_res in stratified.items():
                 correlation[f"{int(width)}m_p75_{tier_name}"] = tier_res
 
+    sensitivity_path: Path | None = None
+    sensitivity_heatmap_path: Path | None = None
+    primary_width = float(cfg.primary_buffer_m)
+    primary_enc = enc_by_width.get(primary_width)
+    if primary_enc is not None and not primary_enc.empty:
+        sens = sensitivity_grid(primary_enc, config=cfg)
+        sensitivity_path = run_dir / f"sensitivity_{int(primary_width)}m.csv"
+        sens.to_csv(sensitivity_path, index=False)
+        sensitivity_heatmap_path = run_dir / "rvi_sensitivity_analysis.png"
+        sensitivity_heatmap(sens, save_path=sensitivity_heatmap_path)
+
     # 6) County aggregation + choropleth -----------------------------------
     counties_path: Path | None = None
     choropleth_path: Path | None = None
@@ -500,9 +534,15 @@ def run_national(
                     .to_dict(orient="records")
                 )
 
+    correlation_payload = {k: v.as_dict() for k, v in correlation.items()}
+    (run_dir / "correlation.json").write_text(
+        json.dumps(correlation_payload, default=str, indent=2),
+        encoding="utf-8",
+    )
+
     # Manifest written BEFORE the optional viz step so it's always available
     # even if Folium map generation is slow / killed at extreme scale.
-    manifest["correlation"] = {k: v.as_dict() for k, v in correlation.items()}
+    manifest["correlation"] = correlation_payload
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, default=str, indent=2),
@@ -563,6 +603,8 @@ def run_national(
         correlation=correlation,
         upstream_paths=upstream_paths,
         manifest_path=manifest_path,
+        sensitivity_path=sensitivity_path,
+        sensitivity_heatmap_path=sensitivity_heatmap_path,
     )
 
 

@@ -18,7 +18,7 @@ Buffer polygons use:
   rounded ends that would otherwise overlap at confluences.
 * ``join_style=2`` (mitre) — sharp corners at sinuous bends.
 
-All operations happen in :data:`Config.crs_metric` (UTM 37N). If the input is
+All operations happen in :data:`Config.crs_metric` (UTM 37S). If the input is
 in geographic coordinates the function reprojects, buffers in metres, and
 either keeps the result in metric CRS (the default) or reprojects back.
 """

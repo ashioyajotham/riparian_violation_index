@@ -24,10 +24,13 @@ intermediate mapping step.
 from __future__ import annotations
 
 import enum
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import geopandas as gpd
@@ -158,6 +161,7 @@ class FloodHubClient:
             "User-Agent": cfg.user_agent,
             "Accept": "application/json",
         }
+        self._cache_dir = Path(cfg.cache_dir) / "floodhub"
 
     # -- low-level HTTP -----------------------------------------------------
 
@@ -187,9 +191,19 @@ class FloodHubClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        use_cache: bool = True,
     ) -> dict[str, Any]:
         url = f"{self._base_url}/{path.lstrip('/')}"
+        cache_path = (
+            self._cache_path(method=method, path=path, params=params, json_body=json_body)
+            if use_cache
+            else None
+        )
+        if cache_path is not None and cache_path.exists():
+            logger.info("Flood Hub cache hit: %s", cache_path.name)
+            return json_load(cache_path)
+
         last_exc: Exception | None = None
         for attempt in range(1, self._max_retries + 1):
             try:
@@ -198,7 +212,7 @@ class FloodHubClient:
                     method,
                     url,
                     params=params,
-                    json=json,
+                    json=json_body,
                     headers=self._headers,
                     timeout=self._cfg.request_timeout_s,
                 )
@@ -208,7 +222,14 @@ class FloodHubClient:
                     raise FloodHubError(
                         f"Flood Hub HTTP {resp.status_code}: {resp.text[:500]}"
                     )
-                return resp.json() if resp.text else {}
+                payload = resp.json() if resp.text else {}
+                if cache_path is not None:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(
+                        json.dumps(payload, default=str, sort_keys=True, indent=2),
+                        encoding="utf-8",
+                    )
+                return payload
             except (requests.RequestException, ValueError) as exc:
                 last_exc = exc
                 wait = self._backoff * attempt
@@ -223,6 +244,33 @@ class FloodHubClient:
                     time.sleep(wait)
         assert last_exc is not None
         raise FloodHubError(f"Flood Hub failed after {self._max_retries} attempts") from last_exc
+
+    def _cache_path(
+        self,
+        *,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None,
+        json_body: dict[str, Any] | None,
+    ) -> Path:
+        fingerprint = {
+            "base_url": self._base_url,
+            "method": method.upper(),
+            "path": path.lstrip("/"),
+            "params": self._cacheable_params(params),
+            "json": json_body or {},
+        }
+        digest = hashlib.sha256(
+            json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        safe_name = path.replace(":", "_").replace("/", "__")
+        return self._cache_dir / f"{safe_name}_{digest[:16]}.json"
+
+    @staticmethod
+    def _cacheable_params(params: dict[str, Any] | None) -> dict[str, Any]:
+        if not params:
+            return {}
+        return {k: v for k, v in params.items() if k != "key"}
 
     # -- public endpoints ---------------------------------------------------
 
@@ -264,7 +312,7 @@ class FloodHubClient:
                 "POST",
                 "gauges:searchGaugesByArea",
                 params=self._params(),
-                json=payload,
+                json_body=payload,
             )
             for raw in resp.get("gauges", []) or []:
                 g = _parse_gauge(raw)
@@ -307,7 +355,7 @@ class FloodHubClient:
                 "POST",
                 "floodStatus:searchLatestFloodStatusByArea",
                 params=self._params(),
-                json=payload,
+                json_body=payload,
             )
             for raw in resp.get("floodStatuses", []) or []:
                 fs = _parse_status(raw)
@@ -496,6 +544,10 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def json_load(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 __all__ = [

@@ -27,7 +27,7 @@ For every 500-metre river segment in the analysis area:
 
 The same pipeline produces an interactive Folium choropleth, a ranked list of the most
 encroached segments, and a publishable scatter plot of `upstream_rvi_p75` vs
-`floodhub_severity_int`.
+`floodhub_severity_int`, plus a weight-sensitivity heatmap for the primary buffer width.
 
 ---
 
@@ -45,7 +45,7 @@ rvi-kenya/
 │   ├── ingestion/
 │   │   ├── osm.py              # OSM waterways (Overpass + Geofabrik PBF)
 │   │   ├── floodhub.py         # Google Flood Forecasting REST client
-│   │   └── buildings.py        # Microsoft footprints via DuckDB spatial
+│   │   └── buildings.py        # Microsoft footprints via tiled GeoDataFrame ingestion
 │   ├── geometry/
 │   │   ├── buffer.py           # multi-width riparian buffers
 │   │   └── segment.py          # 500 m linear segmentation
@@ -110,7 +110,8 @@ This:
 - fetches Nairobi-basin waterways from Overpass,
 - downloads the building footprint tiles covering the basin,
 - queries the Flood Hub status for Kenyan gauges,
-- writes `outputs/nairobi/rvi_segments.gpkg` and `outputs/nairobi/rvi_map.html`.
+- writes `outputs/nairobi_pilot/rvi_segments.gpkg`, `outputs/nairobi_pilot/rvi_segment_map.html`,
+  and `outputs/nairobi_pilot/rvi_sensitivity_analysis.png`.
 
 ### 5. Run the national pipeline
 
@@ -118,8 +119,8 @@ This:
 rvi national
 ```
 
-Requires `pip install -e ".[national]"`. Streams the Geofabrik Kenya PBF and the full
-Microsoft footprint dataset via DuckDB.
+Requires `pip install -e ".[national]"`. Streams the Geofabrik Kenya PBF and
+filters Microsoft footprint tiles against the national riparian corridor.
 
 ---
 
@@ -129,7 +130,7 @@ Microsoft footprint dataset via DuckDB.
   environment variables.
 - Every intermediate stage persists to disk as a GeoPackage; re-running with cached inputs
   skips refetch.
-- All API responses are cached under `data/cache/` keyed by request hash.
+- Overpass, Geofabrik, GADM, Microsoft footprint artifacts, and Flood Hub responses are cached on disk.
 - The exact Geofabrik PBF date and Microsoft footprint tile manifest used for any run are
   written into `outputs/<run_id>/manifest.json`.
 

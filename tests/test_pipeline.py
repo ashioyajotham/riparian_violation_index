@@ -72,6 +72,11 @@ def test_run_pilot_smoke_with_skip_floodhub_and_synthetic_buildings(
     assert (tmp_path / "outputs" / "smoke" / "waterways.gpkg").exists()
     assert (tmp_path / "outputs" / "smoke" / "segments.gpkg").exists()
     assert (tmp_path / "outputs" / "smoke" / "rvi_segments.gpkg").exists()
+    assert result.sensitivity_path is not None and result.sensitivity_path.exists()
+    assert (
+        result.sensitivity_heatmap_path is not None
+        and result.sensitivity_heatmap_path.exists()
+    )
     # No correlation because Flood Hub was skipped.
     assert result.correlation == {}
 
@@ -103,6 +108,11 @@ def test_run_pilot_with_skip_buildings_zero_rvi(
         )
 
     assert result.rvi_segments_path.exists()
+    assert result.sensitivity_path is not None and result.sensitivity_path.exists()
+    assert (
+        result.sensitivity_heatmap_path is not None
+        and result.sensitivity_heatmap_path.exists()
+    )
     rvi_gdf = gpd.read_file(result.rvi_segments_path)
     composite_cols = [c for c in rvi_gdf.columns if c.startswith("rvi_composite_")]
     assert composite_cols, "expected at least one rvi_composite_*m column"
@@ -178,6 +188,11 @@ def test_run_national_smoke_with_injected_inputs(
     assert result.waterways_path.exists()
     assert result.segments_path.exists()
     assert result.rvi_segments_path.exists()
+    assert result.sensitivity_path is not None and result.sensitivity_path.exists()
+    assert (
+        result.sensitivity_heatmap_path is not None
+        and result.sensitivity_heatmap_path.exists()
+    )
     # County choropleth + counties GPKG written.
     assert result.choropleth_path is not None and result.choropleth_path.exists()
     assert result.counties_path is not None and result.counties_path.exists()
@@ -212,6 +227,11 @@ def test_run_national_skip_counties(
     assert result.choropleth_path is None
     assert result.counties_path is None
     assert result.rvi_segments_path.exists()
+    assert result.sensitivity_path is not None and result.sensitivity_path.exists()
+    assert (
+        result.sensitivity_heatmap_path is not None
+        and result.sensitivity_heatmap_path.exists()
+    )
 
 
 def test_run_national_skip_buildings_yields_zero_rvi(
@@ -233,6 +253,11 @@ def test_run_national_skip_buildings_yields_zero_rvi(
         skip_buildings=True,
         skip_floodhub=True,
         skip_counties=True,
+    )
+    assert result.sensitivity_path is not None and result.sensitivity_path.exists()
+    assert (
+        result.sensitivity_heatmap_path is not None
+        and result.sensitivity_heatmap_path.exists()
     )
     rvi_gdf = gpd.read_file(result.rvi_segments_path)
     composite_cols = [c for c in rvi_gdf.columns if c.startswith("rvi_composite_")]

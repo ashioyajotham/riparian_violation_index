@@ -136,6 +136,8 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    "-p",
+    "no:cacheprovider",
 ]
 testpaths = ["tests"]
 markers = [

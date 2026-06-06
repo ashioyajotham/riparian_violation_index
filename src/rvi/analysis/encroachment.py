@@ -6,7 +6,7 @@ inside the buffer, and compute the per-building distance from the river
 centreline. The result is the per-segment statistics block consumed by
 :mod:`rvi.analysis.rvi`.
 
-Inputs (all in :data:`Config.crs_metric` — UTM 37N):
+Inputs (all in :data:`Config.crs_metric` — UTM 37S):
 
 * ``segments``  — output of :func:`rvi.geometry.segment.segment_waterways`
   (LineString centrelines).
@@ -25,7 +25,7 @@ Output schema (one row per segment):
 * ``mean_dist_m``                      (float, NaN if n_buildings==0)
 * ``min_dist_m``                       (float, NaN if n_buildings==0)
 * ``max_dist_m``                       (float, NaN if n_buildings==0)
-* ``geometry``                         (segment LineString, EPSG:32637)
+* ``geometry``                         (segment LineString, EPSG:32737)
 """
 
 from __future__ import annotations

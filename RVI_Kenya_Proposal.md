@@ -308,8 +308,9 @@ most complete building footprint dataset available for Kenya.
 
 The dataset is partitioned by Bing Maps quadkey tiles, which allows spatial subsetting: for
 the Nairobi pilot, only the tiles covering the Nairobi basin are downloaded (~few hundred MB).
-For the national run, DuckDB with its spatial extension is used to stream and join the full
-15-million-record dataset without loading it entirely into memory.
+For the national run, the current implementation streams Microsoft footprint tiles
+and filters them against the riparian corridor incrementally; a DuckDB-backed path
+remains available as a scaling option rather than the default execution path.
 
 A known limitation is that the dataset reflects imagery from approximately 2020–2021, with the
 2023 update incorporating additional validation rather than entirely new imagery. Structures
@@ -371,7 +372,7 @@ rvi-kenya/
 │   ├── ingestion/
 │   │   ├── osm.py              # waterway fetch (Overpass + Geofabrik PBF)
 │   │   ├── floodhub.py         # Flood Hub REST client + validation oracle
-│   │   └── buildings.py        # MS footprint loader (DuckDB, quadkey-tiled)
+│   │   └── buildings.py        # MS footprint loader (quadkey-tiled; DuckDB helper optional)
 │   ├── geometry/
 │   │   ├── buffer.py           # riparian buffer generation at 6/10/30m
 │   │   └── segment.py          # 500m waterway segmentation
@@ -389,18 +390,20 @@ as `name_local` — many Kenyan rivers are better known by their Swahili names t
 administrative English names.
 
 **Buildings:** The Microsoft footprint tiles covering the analysis area are downloaded and
-assembled into a single GeoDataFrame using DuckDB's spatial extension. For the Nairobi pilot
+assembled into a single GeoDataFrame from matching quadkey tiles. For the Nairobi pilot
 (~0.35° × 0.35° bounding box) the assembled dataset is approximately 200,000–400,000 footprints.
-For the national run, DuckDB streams the 15-million-record dataset in spatial chunks.
+For the national run, the implementation currently filters each Kenya tile against
+the national riparian corridor before concatenating the retained footprints.
 
 **Flood Hub:** All gauges in Kenya are discovered via the `searchGaugesByArea` POST endpoint
 with `regionCode: "KE"` and `includeNonQualityVerified: true`. Current flood severity is
-fetched via `searchLatestFloodStatusByArea`. Both datasets are cached to disk.
+fetched via `searchLatestFloodStatusByArea`. Flood Hub responses are cached to disk
+by request fingerprint under the pipeline cache directory.
 
 ### 5.3 Stage 2 — Geometry
 
-**Reprojection:** All data is reprojected to EPSG:32637 (WGS 84 / UTM zone 37N), the metric
-coordinate reference system covering all of Kenya. Buffer and distance calculations require
+**Reprojection:** All data is reprojected to EPSG:32737 (WGS 84 / UTM zone 37S), the metric
+coordinate reference system used by the current implementation for Kenya analyses. Buffer and distance calculations require
 metric units; degree-based calculations would introduce systematic error.
 
 **Centreline-to-bank offset:** OSM waterways are centrelines. The legal riparian setback is
@@ -474,6 +477,7 @@ alongside the correlation coefficient and p-value.
 | `rvi_nairobi_detail.html` | Folium HTML | Nairobi basin detail map with segment overlay |
 | `rvi_floodhub_correlation.png` | PNG | Scatter plot: upstream RVI vs severity |
 | `rvi_sensitivity_analysis.png` | PNG | Weight sensitivity heatmap (α, β, γ) |
+| `sensitivity_30m.csv` | CSV | Long-form RVI scores across the α/β/γ weight grid |
 | `METHODOLOGY.md` | Markdown | Full formula documentation for citation |
 
 ---
@@ -485,18 +489,19 @@ alongside the correlation coefficient and p-value.
 | Spatial operations | GeoPandas ≥ 0.14, Shapely ≥ 2.0 | Standard Python geospatial stack |
 | CRS management | pyproj ≥ 3.6 | PROJ bindings; required for UTM reprojection |
 | OSM data (national) | pyrosm ≥ 0.6 | Reads PBF directly; no Overpass timeout risk |
-| Building assembly | DuckDB ≥ 0.10 + spatial extension | Streams 15M records without OOM |
+| Building assembly | GeoPandas tile streaming; DuckDB optional | Filters Kenya footprint tiles against riparian buffers |
 | Flood Hub client | requests ≥ 2.31 | Thin REST wrapper, no framework overhead |
 | Catchment delineation | pysheds (Phase 2) | DEM-based flow routing for true catchments |
 | Visualisation | Folium ≥ 0.15 | Standalone HTML choropleth maps, no server needed |
 | Statistical analysis | scipy.stats | Spearman correlation, bootstrap CI |
-| Testing | pytest ≥ 8.0, pytest-mock ≥ 3.12 | 126 tests passing across all modules |
+| Testing | pytest ≥ 8.0, pytest-mock ≥ 3.12 | 127 tests passing across all modules |
 | Configuration | python-dotenv | `.env`-based API key and parameter management |
 
 All dependencies are specified in `pyproject.toml`. The full pipeline runs on a standard laptop
 (tested on Python 3.12, Ubuntu 24). The Nairobi pilot completes in approximately 5–10 minutes.
-The national run requires approximately 30–60 minutes and 8–16 GB RAM for the DuckDB building
-assembly step.
+The national run requires approximately 30–60 minutes and memory proportional to the
+retained riparian-corridor footprint subset, since the current path concatenates kept tiles
+after per-tile filtering.
 
 ---
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,7 +55,6 @@ def test_severity_supports_arithmetic_ordering() -> None:
 # FloodHubClient — mocked transport
 # ---------------------------------------------------------------------------
 
-
 def _mock_response(payload: dict[str, Any], status_code: int = 200) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
@@ -64,7 +65,13 @@ def _mock_response(payload: dict[str, Any], status_code: int = 200) -> MagicMock
 
 
 def _client(cfg: Config, session: MagicMock) -> FloodHubClient:
-    cfg = Config(**{**cfg.__dict__, "floodhub_api_key": "test-key"})
+    cfg = Config(
+        **{
+            **cfg.__dict__,
+            "floodhub_api_key": "test-key",
+            "cache_dir": Path("outputs") / "test-floodhub-cache" / uuid4().hex,
+        }
+    )
     return FloodHubClient(api_key="test-key", config=cfg, session=session, max_retries=2, retry_backoff_s=0.0)
 
 
@@ -146,6 +153,69 @@ def test_500_then_200_succeeds_via_retry(cfg: Config) -> None:
     out = cli.search_gauges_by_area(region_code="KE")
     assert out == []
     assert session.request.call_count == 2
+
+
+def test_search_gauges_by_area_writes_cache(cfg: Config, tmp_path: Path) -> None:
+    session = MagicMock()
+    session.request.return_value = _mock_response(
+        {
+            "gauges": [
+                {"gaugeId": "g1", "latitude": -1.28, "longitude": 36.83},
+            ]
+        }
+    )
+    cache_cfg = Config(
+        **{
+            **cfg.__dict__,
+            "floodhub_api_key": "test-key",
+            "cache_dir": tmp_path / "cache",
+        }
+    )
+    cli = FloodHubClient(
+        api_key="test-key",
+        config=cache_cfg,
+        session=session,
+        max_retries=1,
+        retry_backoff_s=0.0,
+    )
+
+    out = cli.search_gauges_by_area(region_code="KE")
+    assert [g.gauge_id for g in out] == ["g1"]
+    cached = list((tmp_path / "cache" / "floodhub").glob("*.json"))
+    assert len(cached) == 1
+
+
+def test_search_gauges_by_area_uses_cache_on_second_call(
+    cfg: Config, tmp_path: Path
+) -> None:
+    session = MagicMock()
+    session.request.return_value = _mock_response(
+        {
+            "gauges": [
+                {"gaugeId": "g1", "latitude": -1.28, "longitude": 36.83},
+            ]
+        }
+    )
+    cache_cfg = Config(
+        **{
+            **cfg.__dict__,
+            "floodhub_api_key": "test-key",
+            "cache_dir": tmp_path / "cache",
+        }
+    )
+    cli = FloodHubClient(
+        api_key="test-key",
+        config=cache_cfg,
+        session=session,
+        max_retries=1,
+        retry_backoff_s=0.0,
+    )
+
+    first = cli.search_gauges_by_area(region_code="KE")
+    second = cli.search_gauges_by_area(region_code="KE")
+    assert [g.gauge_id for g in first] == ["g1"]
+    assert [g.gauge_id for g in second] == ["g1"]
+    assert session.request.call_count == 1
 
 
 # ---------------------------------------------------------------------------

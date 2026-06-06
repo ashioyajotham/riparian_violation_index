@@ -25,7 +25,7 @@ CRS **EPSG:4326** at ingestion time:
   `includeNonQualityVerified=true`, paired with their current severity from
   `floodStatus:searchLatestFloodStatusByArea`.
 
-All three are reprojected to the metric CRS **EPSG:32637** (UTM 37N) before
+All three are reprojected to the metric CRS **EPSG:32737** (UTM 37S) before
 any spatial computation. Buffering, distance, and area in EPSG:4326 give
 systematically wrong metric results in Kenya.
 

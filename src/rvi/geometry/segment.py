@@ -49,7 +49,7 @@ def segment_waterways(
     """Cut a waterway GeoDataFrame into ~uniform-length segments.
 
     Returns a GeoDataFrame with one row per segment, in
-    :data:`Config.crs_metric` (UTM 37N), preserving the parent's metadata
+    :data:`Config.crs_metric` (UTM 37S), preserving the parent's metadata
     columns (``waterway``, ``name``, ``name_local``, ``strahler``, ``osm_id``)
     plus the segmentation columns:
 
