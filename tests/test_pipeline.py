@@ -380,6 +380,45 @@ def test_run_national_falls_back_when_duckdb_loader_fails(
     assert manifest["buildings_loader"] == "geopandas_fallback"
 
 
+def test_run_national_with_bbox_uses_bbox_buildings_loader(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+
+    bbox = (36.65, -1.45, 37.10, -1.15)
+    with (
+        patch(
+            "rvi.ingestion.buildings.load_buildings_for_bbox",
+            return_value=buildings_metric.to_crs("EPSG:4326"),
+        ) as bbox_mock,
+        patch("rvi.ingestion.buildings.stream_buildings_duckdb") as duckdb_mock,
+        patch("rvi.ingestion.buildings.load_buildings_for_country") as fallback_mock,
+    ):
+        result = run_national(
+            config=cfg,
+            run_name="nat_bbox_loader",
+            bbox=bbox,
+            waterways=waterways_metric.to_crs("EPSG:4326"),
+            skip_floodhub=True,
+            skip_counties=True,
+        )
+
+    bbox_mock.assert_called_once()
+    duckdb_mock.assert_not_called()
+    fallback_mock.assert_not_called()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["buildings_loader"] == "bbox"
+
+
 def test_run_pilot_uses_catchment_validation_when_supplied(
     overpass_response: dict[str, Any],
     buildings_metric: gpd.GeoDataFrame,
