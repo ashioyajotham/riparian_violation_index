@@ -308,9 +308,9 @@ most complete building footprint dataset available for Kenya.
 
 The dataset is partitioned by Bing Maps quadkey tiles, which allows spatial subsetting: for
 the Nairobi pilot, only the tiles covering the Nairobi basin are downloaded (~few hundred MB).
-For the national run, the current implementation streams Microsoft footprint tiles
-and filters them against the riparian corridor incrementally; a DuckDB-backed path
-remains available as a scaling option rather than the default execution path.
+For the national run, the implementation now prefers a DuckDB-backed spatial join
+against the riparian corridor and falls back to incremental tile filtering if the
+DuckDB path cannot initialize cleanly on the host machine.
 
 A known limitation is that the dataset reflects imagery from approximately 2020–2021, with the
 2023 update incorporating additional validation rather than entirely new imagery. Structures
@@ -392,8 +392,8 @@ administrative English names.
 **Buildings:** The Microsoft footprint tiles covering the analysis area are downloaded and
 assembled into a single GeoDataFrame from matching quadkey tiles. For the Nairobi pilot
 (~0.35° × 0.35° bounding box) the assembled dataset is approximately 200,000–400,000 footprints.
-For the national run, the implementation currently filters each Kenya tile against
-the national riparian corridor before concatenating the retained footprints.
+For the national run, the implementation first attempts a DuckDB spatial join over
+Parquet-backed Kenya tiles and falls back to per-tile GeoPandas filtering if needed.
 
 **Flood Hub:** All gauges in Kenya are discovered via the `searchGaugesByArea` POST endpoint
 with `regionCode: "KE"` and `includeNonQualityVerified: true`. Current flood severity is
@@ -489,12 +489,12 @@ alongside the correlation coefficient and p-value.
 | Spatial operations | GeoPandas ≥ 0.14, Shapely ≥ 2.0 | Standard Python geospatial stack |
 | CRS management | pyproj ≥ 3.6 | PROJ bindings; required for UTM reprojection |
 | OSM data (national) | pyrosm ≥ 0.6 | Reads PBF directly; no Overpass timeout risk |
-| Building assembly | GeoPandas tile streaming; DuckDB optional | Filters Kenya footprint tiles against riparian buffers |
+| Building assembly | DuckDB spatial join with GeoPandas fallback | Filters Kenya footprint tiles against riparian buffers |
 | Flood Hub client | requests ≥ 2.31 | Thin REST wrapper, no framework overhead |
 | Catchment delineation | pysheds (Phase 2) | DEM-based flow routing for true catchments |
 | Visualisation | Folium ≥ 0.15 | Standalone HTML choropleth maps, no server needed |
 | Statistical analysis | scipy.stats | Spearman correlation, bootstrap CI |
-| Testing | pytest ≥ 8.0, pytest-mock ≥ 3.12 | 131 tests passing across all modules |
+| Testing | pytest ≥ 8.0, pytest-mock ≥ 3.12 | 136 tests passing across all modules |
 | Configuration | python-dotenv | `.env`-based API key and parameter management |
 
 All dependencies are specified in `pyproject.toml`. The full pipeline runs on a standard laptop

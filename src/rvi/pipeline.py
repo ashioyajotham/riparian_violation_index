@@ -444,19 +444,35 @@ def run_national(
         logger.info("Stage 3/6: streaming Microsoft footprints for Kenya")
         # Heavy import, deferred so smoke tests and non-national paths
         # don't pay the cost.
-        from rvi.ingestion.buildings import load_buildings_for_country
+        from rvi.ingestion.buildings import (
+            load_buildings_for_country,
+            stream_buildings_duckdb,
+        )
 
         # Build the largest legal buffer (30 m) once; everything within
         # this corridor is a candidate for encroachment at any width.
         buffers_30m = buffer_waterways(
             waterways, width_m=float(max(cfg.buffer_widths_m)), config=cfg
         )
-        bld = load_buildings_for_country(
-            buffers_30m,
-            config=cfg,
-            country="Kenya",
-            progress=True,
-        )
+        try:
+            bld = stream_buildings_duckdb(
+                buffers_30m,
+                config=cfg,
+                country="Kenya",
+            )
+            manifest["buildings_loader"] = "duckdb"
+        except Exception as exc:
+            logger.warning(
+                "DuckDB national buildings path failed (%s); falling back to tile-stream loader.",
+                exc,
+            )
+            bld = load_buildings_for_country(
+                buffers_30m,
+                config=cfg,
+                country="Kenya",
+                progress=True,
+            )
+            manifest["buildings_loader"] = "geopandas_fallback"
     if bld is None:
         logger.warning("Skipping buildings stream — RVI will be all zeros.")
         bld = gpd.GeoDataFrame(
@@ -469,6 +485,9 @@ def run_national(
             geometry=gpd.GeoSeries([], crs=cfg.crs_geographic),
             crs=cfg.crs_geographic,
         )
+        manifest["buildings_loader"] = "skipped"
+    elif "buildings_loader" not in manifest:
+        manifest["buildings_loader"] = "injected"
     manifest["buildings_count"] = len(bld)
 
     # 4) Encroachment + RVI -------------------------------------------------

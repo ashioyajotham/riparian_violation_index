@@ -126,7 +126,8 @@ rvi national --dem data/raw/copernicus_dem.tif
 ```
 
 Requires `pip install -e ".[national]"`. Streams the Geofabrik Kenya PBF and
-filters Microsoft footprint tiles against the national riparian corridor.
+prefers a DuckDB spatial join for national Microsoft-footprint filtering,
+falling back to the incremental GeoPandas tile path if DuckDB cannot run.
 
 ---
 

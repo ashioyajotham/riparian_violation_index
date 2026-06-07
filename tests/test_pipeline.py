@@ -310,6 +310,76 @@ def test_run_national_skip_buildings_yields_zero_rvi(
         assert (rvi_gdf[col].fillna(0) == 0).all()
 
 
+def test_run_national_prefers_duckdb_buildings_loader(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+
+    with (
+        patch("rvi.ingestion.buildings.stream_buildings_duckdb", return_value=buildings_metric.to_crs("EPSG:4326")) as duckdb_mock,
+        patch("rvi.ingestion.buildings.load_buildings_for_country") as fallback_mock,
+    ):
+        result = run_national(
+            config=cfg,
+            run_name="nat_duckdb",
+            waterways=waterways_metric.to_crs("EPSG:4326"),
+            skip_floodhub=True,
+            skip_counties=True,
+        )
+
+    duckdb_mock.assert_called_once()
+    fallback_mock.assert_not_called()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["buildings_loader"] == "duckdb"
+
+
+def test_run_national_falls_back_when_duckdb_loader_fails(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+
+    with (
+        patch(
+            "rvi.ingestion.buildings.stream_buildings_duckdb",
+            side_effect=RuntimeError("spatial extension unavailable"),
+        ) as duckdb_mock,
+        patch(
+            "rvi.ingestion.buildings.load_buildings_for_country",
+            return_value=buildings_metric.to_crs("EPSG:4326"),
+        ) as fallback_mock,
+    ):
+        result = run_national(
+            config=cfg,
+            run_name="nat_duckdb_fallback",
+            waterways=waterways_metric.to_crs("EPSG:4326"),
+            skip_floodhub=True,
+            skip_counties=True,
+        )
+
+    duckdb_mock.assert_called_once()
+    fallback_mock.assert_called_once()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["buildings_loader"] == "geopandas_fallback"
+
+
 def test_run_pilot_uses_catchment_validation_when_supplied(
     overpass_response: dict[str, Any],
     buildings_metric: gpd.GeoDataFrame,
