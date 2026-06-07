@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gzip
+import json
+import sys
 from unittest.mock import MagicMock
 
 import geopandas as gpd
@@ -366,3 +368,168 @@ def test_rows_to_geodataframe_parses_geojson_string(cfg: Config) -> None:
     gdf = bld_mod._rows_to_geodataframe(df, cfg)
     assert not gdf.empty
     assert gdf.geometry.iloc[0].geom_type == "Polygon"
+
+
+def test_stream_buildings_duckdb_embeds_union_wkt_without_prepared_view(
+    tmp_path, monkeypatch
+) -> None:
+    parquet_dir = tmp_path / "parquet"
+    parquet_dir.mkdir()
+    (parquet_dir / "kenya_qk.parquet").write_text("stub", encoding="utf-8")
+    bld_mod._parquet_manifest_path(parquet_dir, "Kenya").write_text(
+        json.dumps(
+            {
+                "country": "Kenya",
+                "expected_tile_count": 1,
+                "parquet_file_count": 1,
+                "complete": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    buffers_geo = gpd.GeoDataFrame(
+        {"_id": [1]},
+        geometry=[
+            Polygon(
+                [(36.80, -1.29), (36.83, -1.29), (36.83, -1.27), (36.80, -1.27)]
+            )
+        ],
+        crs="EPSG:4326",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _FakeResult:
+        def fetch_df(self):
+            return pd.DataFrame(columns=["building_id", "country", "quadkey", "wkt"])
+
+    class _FakeConnection:
+        def install_extension(self, _name: str) -> None:
+            return None
+
+        def load_extension(self, _name: str) -> None:
+            return None
+
+        def execute(self, sql: str):
+            captured["sql"] = sql
+            return _FakeResult()
+
+        def close(self) -> None:
+            return None
+
+    class _FakeDuckDB:
+        @staticmethod
+        def connect():
+            return _FakeConnection()
+
+    monkeypatch.setitem(sys.modules, "duckdb", _FakeDuckDB)
+    monkeypatch.setattr(
+        bld_mod,
+        "_fetch_buildings_index",
+        lambda **_kwargs: pd.DataFrame(
+            {
+                "Location": ["Kenya"],
+                "QuadKey": ["qk1"],
+                "Url": ["https://example/qk1.csv.gz"],
+            }
+        ),
+    )
+
+    out = bld_mod.stream_buildings_duckdb(
+        buffers_geo,
+        parquet_dir=parquet_dir,
+    )
+
+    assert out.empty
+    sql = captured["sql"]
+    assert "CREATE OR REPLACE TEMP VIEW" not in sql
+    assert "ST_GeomFromText(?)" not in sql
+    assert "ST_AsText(src.geom) AS wkt" in sql
+    assert "ST_GeomFromText('POLYGON" in sql
+
+
+def test_parquet_cache_completion_manifest(tmp_path, monkeypatch) -> None:
+    parquet_dir = tmp_path / "parquet"
+
+    index_df = pd.DataFrame(
+        {
+            "Location": ["Kenya", "Kenya"],
+            "QuadKey": ["qk1", "qk2"],
+            "Url": ["https://example/qk1.csv.gz", "https://example/qk2.csv.gz"],
+        }
+    )
+
+    building = Polygon(
+        [(36.81, -1.281), (36.81, -1.279), (36.812, -1.279), (36.812, -1.281)]
+    )
+
+    def _fake_download(url: str, **_kwargs):
+        if "qk1" in url:
+            return gpd.GeoDataFrame(
+                {
+                    "country": ["Kenya"],
+                    "quadkey": ["qk1"],
+                    "geometry": [building],
+                },
+                geometry="geometry",
+                crs="EPSG:4326",
+            )
+        return gpd.GeoDataFrame(
+            {"country": pd.Series(dtype=str), "quadkey": pd.Series(dtype=str)},
+            geometry=gpd.GeoSeries([], crs="EPSG:4326"),
+            crs="EPSG:4326",
+        )
+
+    class _FakeDuckRelation:
+        def __init__(self, df: pd.DataFrame):
+            self.df = df
+
+        def to_parquet(self, target: str) -> None:
+            self.df.to_parquet(target, index=False)
+
+    class _FakeDuckConnection:
+        def install_extension(self, _name: str) -> None:
+            return None
+
+        def load_extension(self, _name: str) -> None:
+            return None
+
+        def from_df(self, df: pd.DataFrame):
+            return _FakeDuckRelation(df)
+
+        def close(self) -> None:
+            return None
+
+    class _FakeDuckDB:
+        @staticmethod
+        def connect():
+            return _FakeDuckConnection()
+
+    monkeypatch.setitem(sys.modules, "duckdb", _FakeDuckDB)
+    monkeypatch.setattr(bld_mod, "_fetch_buildings_index", lambda **_kwargs: index_df)
+    monkeypatch.setattr(bld_mod, "_download_and_parse_tile", _fake_download)
+
+    bld_mod._materialise_country_parquet(
+        cfg=Config(
+            data_dir=tmp_path / "data",
+            raw_dir=tmp_path / "data" / "raw",
+            interim_dir=tmp_path / "data" / "interim",
+            processed_dir=tmp_path / "data" / "processed",
+            cache_dir=tmp_path / "data" / "cache",
+            outputs_dir=tmp_path / "outputs",
+        ),
+        country="Kenya",
+        parquet_dir=parquet_dir,
+        override_index_url=None,
+    )
+
+    manifest_path = bld_mod._parquet_manifest_path(parquet_dir, "Kenya")
+    assert manifest_path.exists()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert int(payload["expected_tile_count"]) == 2
+    assert int(payload["parquet_file_count"]) == 2
+    assert bool(payload["complete"]) is True
+    assert bld_mod._parquet_cache_is_complete(
+        parquet_dir, country="Kenya", expected_tile_count=2
+    )

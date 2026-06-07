@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import json
 import logging
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -50,6 +51,11 @@ BUILDINGS_COLUMNS: tuple[str, ...] = (
     "footprint_area_m2",
     "geometry",
 )
+
+
+def _sql_quote_literal(value: str) -> str:
+    """Escape a string for safe single-quoted SQL literal embedding."""
+    return value.replace("'", "''")
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +389,26 @@ def stream_buildings_duckdb(
     if waterway_buffers.empty:
         return _empty_buildings_gdf(cfg)
 
-    if parquet_dir.exists() and any(parquet_dir.glob("*.parquet")):
+    sess = requests.Session()
+    sess.headers.setdefault("User-Agent", cfg.user_agent)
+    index_df = _fetch_buildings_index(cfg=cfg, sess=sess, override_url=index_url)
+    country_index = index_df[
+        index_df["Location"].astype(str).str.lower() == country.lower()
+    ].copy()
+    expected_tile_count = len(country_index)
+
+    if _parquet_cache_is_complete(
+        parquet_dir,
+        country=country,
+        expected_tile_count=expected_tile_count,
+    ):
         logger.info("Reusing parquet at %s", parquet_dir)
     else:
+        logger.info(
+            "Parquet cache incomplete or missing for %s; materializing %d tiles",
+            country,
+            expected_tile_count,
+        )
         _materialise_country_parquet(
             cfg=cfg,
             country=country,
@@ -406,9 +429,7 @@ def stream_buildings_duckdb(
         if hasattr(buffers_geo.geometry, "union_all")
         else buffers_geo.geometry.unary_union
     )
-    union_wkt = union_geom.wkt
-
-    con.execute("CREATE OR REPLACE TEMP VIEW buf_view AS SELECT ST_GeomFromText(?) AS geom", [union_wkt])
+    union_wkt_sql = _sql_quote_literal(union_geom.wkt)
 
     parquet_glob = str(parquet_dir / "*.parquet")
     sql = f"""
@@ -416,7 +437,7 @@ def stream_buildings_duckdb(
             row_number() OVER () AS building_id,
             country,
             quadkey,
-            ST_AsText(geom) AS wkt
+            ST_AsText(src.geom) AS wkt
         FROM (
             SELECT
                 country,
@@ -424,7 +445,9 @@ def stream_buildings_duckdb(
                 ST_GeomFromText(geometry_wkt) AS geom
             FROM read_parquet('{parquet_glob}')
         ) src
-        JOIN buf_view ON ST_Intersects(src.geom, buf_view.geom)
+        JOIN (
+            SELECT ST_GeomFromText('{union_wkt_sql}') AS geom
+        ) buf_view ON ST_Intersects(src.geom, buf_view.geom)
     """
     df = con.execute(sql).fetch_df()
     con.close()
@@ -459,6 +482,34 @@ def _fetch_buildings_index(
     return pd.read_csv(io.BytesIO(resp.content))
 
 
+def _parquet_manifest_path(parquet_dir: Path, country: str) -> Path:
+    slug = country.lower().replace(" ", "_")
+    return parquet_dir / f"_{slug}_manifest.json"
+
+
+def _parquet_cache_is_complete(
+    parquet_dir: Path,
+    *,
+    country: str,
+    expected_tile_count: int,
+) -> bool:
+    manifest_path = _parquet_manifest_path(parquet_dir, country)
+    if not parquet_dir.exists() or not manifest_path.exists():
+        return False
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    parquet_count = len(list(parquet_dir.glob("*.parquet")))
+    return (
+        payload.get("country", "").lower() == country.lower()
+        and payload.get("complete") is True
+        and int(payload.get("expected_tile_count", -1)) == expected_tile_count
+        and int(payload.get("parquet_file_count", -1)) == parquet_count
+        and parquet_count == expected_tile_count
+    )
+
+
 def _find_index_quadkey_column(df: pd.DataFrame) -> str:
     for cand in ("QuadKey", "Quadkey", "quadkey"):
         if cand in df.columns:
@@ -467,7 +518,7 @@ def _find_index_quadkey_column(df: pd.DataFrame) -> str:
 
 
 def _download_and_parse_tile(
-    url: str, *, sess: requests.Session, cfg: Config
+    url: str, *, sess: requests.Session, cfg: Config, raise_on_fetch_error: bool = False
 ) -> gpd.GeoDataFrame:
     """Download one Microsoft tile and parse its WKT geometries.
 
@@ -479,6 +530,8 @@ def _download_and_parse_tile(
         resp.raise_for_status()
         body = resp.content
     except requests.RequestException as exc:
+        if raise_on_fetch_error:
+            raise RuntimeError(f"Failed to fetch {url}") from exc
         logger.warning("Failed to fetch %s: %s", url, exc)
         return _empty_buildings_gdf(cfg)
     try:
@@ -488,6 +541,8 @@ def _download_and_parse_tile(
             else body.decode("utf-8")
         )
     except OSError as exc:
+        if raise_on_fetch_error:
+            raise RuntimeError(f"Failed to decompress tile {url}") from exc
         logger.warning("Failed to gunzip %s: %s", url, exc)
         return _empty_buildings_gdf(cfg)
 
@@ -708,6 +763,9 @@ def _materialise_country_parquet(
     index = _fetch_buildings_index(cfg=cfg, sess=sess, override_url=override_index_url)
     index = index[index["Location"].astype(str).str.lower() == country.lower()]
     parquet_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = _parquet_manifest_path(parquet_dir, country)
+    if manifest_path.exists():
+        manifest_path.unlink()
     con = duckdb.connect()
     con.install_extension("spatial")
     con.load_extension("spatial")
@@ -718,18 +776,43 @@ def _materialise_country_parquet(
         target = parquet_dir / f"{country}_{qk}.parquet"
         if target.exists():
             continue
-        gdf = _download_and_parse_tile(url, sess=sess, cfg=cfg)
-        if gdf.empty:
-            continue
-        df = pd.DataFrame(
-            {
-                "country": gdf["country"],
-                "quadkey": gdf["quadkey"],
-                "geometry_wkt": gdf.geometry.apply(lambda g: g.wkt),
-            }
+        gdf = _download_and_parse_tile(
+            url,
+            sess=sess,
+            cfg=cfg,
+            raise_on_fetch_error=True,
         )
+        if gdf.empty:
+            df = pd.DataFrame(
+                {
+                    "country": pd.Series(dtype=str),
+                    "quadkey": pd.Series(dtype=str),
+                    "geometry_wkt": pd.Series(dtype=str),
+                }
+            )
+        else:
+            df = pd.DataFrame(
+                {
+                    "country": gdf["country"],
+                    "quadkey": gdf["quadkey"],
+                    "geometry_wkt": gdf.geometry.apply(lambda g: g.wkt),
+                }
+            )
         con.from_df(df).to_parquet(str(target))
     con.close()
+    parquet_files = len(list(parquet_dir.glob("*.parquet")))
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "country": country,
+                "expected_tile_count": len(index),
+                "parquet_file_count": parquet_files,
+                "complete": parquet_files == len(index),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def buildings_iter(
