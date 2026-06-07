@@ -29,7 +29,9 @@ import gzip
 import io
 import json
 import logging
+import os
 from collections.abc import Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -416,10 +418,6 @@ def stream_buildings_duckdb(
             override_index_url=index_url,
         )
 
-    con = duckdb.connect()
-    con.install_extension("spatial")
-    con.load_extension("spatial")
-
     # Push the buffer union into DuckDB as a single WKT scalar.
     if waterway_buffers.crs is None:
         waterway_buffers = waterway_buffers.set_crs(cfg.crs_geographic)
@@ -431,26 +429,53 @@ def stream_buildings_duckdb(
     )
     union_wkt_sql = _sql_quote_literal(union_geom.wkt)
 
-    parquet_glob = str(parquet_dir / "*.parquet")
-    sql = f"""
-        SELECT
-            row_number() OVER () AS building_id,
-            country,
-            quadkey,
-            ST_AsText(src.geom) AS wkt
-        FROM (
+    parquet_files = sorted(parquet_dir.glob("*.parquet"))
+    if not parquet_files:
+        return _empty_buildings_gdf(cfg)
+
+    con = duckdb.connect()
+    con.install_extension("spatial")
+    con.load_extension("spatial")
+    con.execute("SET preserve_insertion_order=false")
+    con.execute(f"SET threads={min(4, max(1, os.cpu_count() or 1))}")
+
+    chunk_size = 8
+    frames: list[pd.DataFrame] = []
+    for start in range(0, len(parquet_files), chunk_size):
+        chunk = parquet_files[start : start + chunk_size]
+        files_sql = ", ".join(f"'{_sql_quote_literal(str(path))}'" for path in chunk)
+        sql = f"""
             SELECT
                 country,
                 quadkey,
-                ST_GeomFromText(geometry_wkt) AS geom
-            FROM read_parquet('{parquet_glob}')
-        ) src
-        JOIN (
-            SELECT ST_GeomFromText('{union_wkt_sql}') AS geom
-        ) buf_view ON ST_Intersects(src.geom, buf_view.geom)
-    """
-    df = con.execute(sql).fetch_df()
+                ST_AsText(src.geom) AS wkt
+            FROM (
+                SELECT
+                    country,
+                    quadkey,
+                    ST_GeomFromText(geometry_wkt) AS geom
+                FROM read_parquet([{files_sql}])
+            ) src
+            JOIN (
+                SELECT ST_GeomFromText('{union_wkt_sql}') AS geom
+            ) buf_view ON ST_Intersects(src.geom, buf_view.geom)
+        """
+        chunk_df = con.execute(sql).fetch_df()
+        if not chunk_df.empty:
+            frames.append(chunk_df)
+        logger.info(
+            "DuckDB buildings chunk %d-%d/%d processed",
+            start + 1,
+            min(start + chunk_size, len(parquet_files)),
+            len(parquet_files),
+        )
     con.close()
+
+    if not frames:
+        return _empty_buildings_gdf(cfg)
+
+    df = pd.concat(frames, ignore_index=True)
+    df["building_id"] = pd.RangeIndex(start=1, stop=len(df) + 1)
 
     if df.empty:
         return _empty_buildings_gdf(cfg)
@@ -756,8 +781,6 @@ def _materialise_country_parquet(
     Skipped from the test suite (it would download many GB), but exercised
     by ``rvi national``.
     """
-    import duckdb
-
     sess = requests.Session()
     sess.headers["User-Agent"] = cfg.user_agent
     index = _fetch_buildings_index(cfg=cfg, sess=sess, override_url=override_index_url)
@@ -766,19 +789,30 @@ def _materialise_country_parquet(
     manifest_path = _parquet_manifest_path(parquet_dir, country)
     if manifest_path.exists():
         manifest_path.unlink()
-    con = duckdb.connect()
-    con.install_extension("spatial")
-    con.load_extension("spatial")
 
-    for _, row in index.iterrows():
+    qk_col = _find_index_quadkey_column(index)
+    pending_rows = [
+        row for _, row in index.iterrows()
+        if not (parquet_dir / f"{country}_{str(row[qk_col])}.parquet").exists()
+    ]
+    if pending_rows:
+        logger.info(
+            "Materializing %d missing Microsoft tiles to parquet for %s",
+            len(pending_rows),
+            country,
+        )
+
+    max_workers = min(8, max(1, (os.cpu_count() or 4) // 2))
+
+    def _write_one_tile(row: pd.Series) -> Path:
         url = str(row["Url"])
-        qk = str(row[_find_index_quadkey_column(index)])
+        qk = str(row[qk_col])
         target = parquet_dir / f"{country}_{qk}.parquet"
-        if target.exists():
-            continue
+        tile_sess = requests.Session()
+        tile_sess.headers["User-Agent"] = cfg.user_agent
         gdf = _download_and_parse_tile(
             url,
-            sess=sess,
+            sess=tile_sess,
             cfg=cfg,
             raise_on_fetch_error=True,
         )
@@ -798,8 +832,26 @@ def _materialise_country_parquet(
                     "geometry_wkt": gdf.geometry.apply(lambda g: g.wkt),
                 }
             )
-        con.from_df(df).to_parquet(str(target))
-    con.close()
+        df.to_parquet(target, index=False)
+        return target
+
+    completed = len(index) - len(pending_rows)
+    if pending_rows:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ms-parquet") as pool:
+            futures = {pool.submit(_write_one_tile, row) for row in pending_rows}
+            while futures:
+                done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    fut.result()
+                    completed += 1
+                if completed % 10 == 0 or completed == len(index):
+                    logger.info(
+                        "Microsoft parquet progress for %s: %d/%d tiles",
+                        country,
+                        completed,
+                        len(index),
+                    )
+
     parquet_files = len(list(parquet_dir.glob("*.parquet")))
     manifest_path.write_text(
         json.dumps(

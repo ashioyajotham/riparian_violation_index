@@ -419,6 +419,43 @@ def test_run_national_with_bbox_uses_bbox_buildings_loader(
     assert manifest["buildings_loader"] == "bbox"
 
 
+def test_run_national_prefers_country_cache_when_present(
+    waterways_metric: gpd.GeoDataFrame,
+    buildings_metric: gpd.GeoDataFrame,
+    tmp_path,
+) -> None:
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        raw_dir=tmp_path / "data" / "raw",
+        interim_dir=tmp_path / "data" / "interim",
+        processed_dir=tmp_path / "data" / "processed",
+        cache_dir=tmp_path / "data" / "cache",
+        outputs_dir=tmp_path / "outputs",
+    )
+    cfg.ensure_dirs()
+    (cfg.cache_dir / "ms_buildings_country_kenya.gpkg").write_text("cached")
+
+    with (
+        patch(
+            "rvi.ingestion.buildings.load_buildings_for_country",
+            return_value=buildings_metric.to_crs("EPSG:4326"),
+        ) as country_mock,
+        patch("rvi.ingestion.buildings.stream_buildings_duckdb") as duckdb_mock,
+    ):
+        result = run_national(
+            config=cfg,
+            run_name="nat_country_cache",
+            waterways=waterways_metric.to_crs("EPSG:4326"),
+            skip_floodhub=True,
+            skip_counties=True,
+        )
+
+    country_mock.assert_called_once()
+    duckdb_mock.assert_not_called()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["buildings_loader"] == "country_cache"
+
+
 def test_run_pilot_uses_catchment_validation_when_supplied(
     overpass_response: dict[str, Any],
     buildings_metric: gpd.GeoDataFrame,

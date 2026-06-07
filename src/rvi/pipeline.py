@@ -460,30 +460,44 @@ def run_national(
             )
             manifest["buildings_loader"] = "bbox"
         else:
+            country_cache_path = cfg.cache_dir / "ms_buildings_country_kenya.gpkg"
             # Build the largest legal buffer (30 m) once; everything within
             # this corridor is a candidate for encroachment at any width.
             buffers_30m = buffer_waterways(
                 waterways, width_m=float(max(cfg.buffer_widths_m)), config=cfg
             )
-            try:
-                bld = stream_buildings_duckdb(
-                    buffers_30m,
-                    config=cfg,
-                    country="Kenya",
-                )
-                manifest["buildings_loader"] = "duckdb"
-            except Exception as exc:
-                logger.warning(
-                    "DuckDB national buildings path failed (%s); falling back to tile-stream loader.",
-                    exc,
+            if country_cache_path.exists():
+                logger.info(
+                    "Using cached country-scale buildings: %s",
+                    country_cache_path,
                 )
                 bld = load_buildings_for_country(
                     buffers_30m,
                     config=cfg,
                     country="Kenya",
-                    progress=True,
+                    progress=False,
                 )
-                manifest["buildings_loader"] = "geopandas_fallback"
+                manifest["buildings_loader"] = "country_cache"
+            else:
+                try:
+                    bld = stream_buildings_duckdb(
+                        buffers_30m,
+                        config=cfg,
+                        country="Kenya",
+                    )
+                    manifest["buildings_loader"] = "duckdb"
+                except Exception as exc:
+                    logger.warning(
+                        "DuckDB national buildings path failed (%s); falling back to tile-stream loader.",
+                        exc,
+                    )
+                    bld = load_buildings_for_country(
+                        buffers_30m,
+                        config=cfg,
+                        country="Kenya",
+                        progress=True,
+                    )
+                    manifest["buildings_loader"] = "geopandas_fallback"
     if bld is None:
         logger.warning("Skipping buildings stream — RVI will be all zeros.")
         bld = gpd.GeoDataFrame(

@@ -398,11 +398,11 @@ def test_stream_buildings_duckdb_embeds_union_wkt_without_prepared_view(
         crs="EPSG:4326",
     )
 
-    captured: dict[str, str] = {}
+    captured: list[str] = []
 
     class _FakeResult:
         def fetch_df(self):
-            return pd.DataFrame(columns=["building_id", "country", "quadkey", "wkt"])
+            return pd.DataFrame(columns=["country", "quadkey", "wkt"])
 
     class _FakeConnection:
         def install_extension(self, _name: str) -> None:
@@ -412,7 +412,7 @@ def test_stream_buildings_duckdb_embeds_union_wkt_without_prepared_view(
             return None
 
         def execute(self, sql: str):
-            captured["sql"] = sql
+            captured.append(sql)
             return _FakeResult()
 
         def close(self) -> None:
@@ -442,11 +442,12 @@ def test_stream_buildings_duckdb_embeds_union_wkt_without_prepared_view(
     )
 
     assert out.empty
-    sql = captured["sql"]
-    assert "CREATE OR REPLACE TEMP VIEW" not in sql
-    assert "ST_GeomFromText(?)" not in sql
-    assert "ST_AsText(src.geom) AS wkt" in sql
-    assert "ST_GeomFromText('POLYGON" in sql
+    joined_sql = "\n".join(captured)
+    assert "CREATE OR REPLACE TEMP VIEW" not in joined_sql
+    assert "ST_GeomFromText(?)" not in joined_sql
+    assert "ST_AsText(src.geom) AS wkt" in joined_sql
+    assert "ST_GeomFromText('POLYGON" in joined_sql
+    assert "read_parquet([" in joined_sql
 
 
 def test_parquet_cache_completion_manifest(tmp_path, monkeypatch) -> None:
