@@ -25,6 +25,10 @@ from rvi.config import Config, get_config
 logger = logging.getLogger(__name__)
 
 
+class CatchmentDelineationError(RuntimeError):
+    """Raised when DEM-driven catchment generation cannot proceed cleanly."""
+
+
 def delineate_catchments_from_dem(
     gauges: gpd.GeoDataFrame,
     dem_path: Path | str,
@@ -53,18 +57,46 @@ def delineate_catchments_from_dem(
         )
 
     dem_path = Path(dem_path)
-    with rasterio.open(dem_path) as src:
-        dem_crs = src.crs or cfg.crs_geographic
+    if gauge_id_column not in gauges.columns:
+        raise CatchmentDelineationError(
+            f'Gauge column "{gauge_id_column}" was not found in the gauge layer.'
+        )
+    if not dem_path.exists():
+        raise CatchmentDelineationError(f"DEM raster does not exist: {dem_path}")
+    invalid_geometry = gauges.geometry.notna() & ~gauges.geometry.geom_type.isin(["Point", "MultiPoint"])
+    if invalid_geometry.any():
+        raise CatchmentDelineationError(
+            "Gauge layer must contain point geometries for DEM-driven catchment delineation."
+        )
+
+    try:
+        with rasterio.open(dem_path) as src:
+            dem_crs = src.crs or cfg.crs_geographic
+    except Exception as exc:
+        raise CatchmentDelineationError(
+            f"Unable to open DEM raster {dem_path}: {exc}"
+        ) from exc
 
     gauge_frame = gauges
     if gauge_frame.crs is None:
         gauge_frame = gauge_frame.set_crs(cfg.crs_geographic)
     if dem_crs is not None and gauge_frame.crs != dem_crs:
-        gauge_frame = gauge_frame.to_crs(dem_crs)
+        try:
+            gauge_frame = gauge_frame.to_crs(dem_crs)
+        except Exception as exc:
+            raise CatchmentDelineationError(
+                f"Failed to reproject gauges into DEM CRS {dem_crs}. "
+                "Check the gauge CRS and local PROJ/GDAL configuration."
+            ) from exc
 
-    grid = Grid.from_raster(str(dem_path))
-    dem = grid.read_raster(str(dem_path))
-    fdir = grid.flowdir(dem)
+    try:
+        grid = Grid.from_raster(str(dem_path))
+        dem = grid.read_raster(str(dem_path))
+        fdir = grid.flowdir(dem)
+    except Exception as exc:
+        raise CatchmentDelineationError(
+            f"Failed to initialize flow routing from DEM {dem_path}: {exc}"
+        ) from exc
 
     rows: list[dict[str, Any]] = []
     for _, row in gauge_frame.iterrows():
@@ -72,6 +104,15 @@ def delineate_catchments_from_dem(
         gauge_id = row.get(gauge_id_column)
         if geom is None or geom.is_empty or gauge_id is None:
             continue
+        if geom.geom_type == "MultiPoint":
+            if len(geom.geoms) != 1:
+                logger.warning(
+                    "Catchment delineation skipped for gauge %s because MultiPoint has %s points.",
+                    gauge_id,
+                    len(geom.geoms),
+                )
+                continue
+            geom = geom.geoms[0]
         try:
             catchment = grid.catchment(
                 x=float(geom.x),
@@ -115,4 +156,4 @@ def _polygonize_catchment(catchment: Any):
     return unary_union(polygons)
 
 
-__all__ = ["delineate_catchments_from_dem"]
+__all__ = ["CatchmentDelineationError", "delineate_catchments_from_dem"]
