@@ -39,11 +39,21 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _echo_correlation_summary(correlation: dict[str, object]) -> None:
+    """Print correlation results using ASCII-only console output."""
+    click.echo("\nCorrelation (Spearman rho - upstream RVI vs Flood Hub severity):")
+    for key, value in correlation.items():
+        click.echo(
+            f"  {key:>32s}: rho={value.rho:+.3f}, n={value.n}, "
+            f"95%CI=[{value.ci_low:+.3f}, {value.ci_high:+.3f}], p={value.pvalue:.3g}"
+        )
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-v", "--verbose", is_flag=True, help="Verbose (DEBUG) logging.")
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
-    """RVI-Kenya — Riparian Violation Index pipeline."""
+    """RVI-Kenya - Riparian Violation Index pipeline."""
     _setup_logging(verbose)
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
@@ -125,12 +135,7 @@ def pilot(
     if result.map_path is not None:
         click.echo(f"Interactive map: {result.map_path}")
     if result.correlation:
-        click.echo("\nCorrelation (Spearman ρ — upstream RVI vs Flood Hub severity):")
-        for k, v in result.correlation.items():
-            click.echo(
-                f"  {k:>32s}: ρ={v.rho:+.3f}, n={v.n}, "
-                f"95%CI=[{v.ci_low:+.3f}, {v.ci_high:+.3f}], p={v.pvalue:.3g}"
-            )
+        _echo_correlation_summary(result.correlation)
     else:
         click.echo("Validation skipped or no Flood Hub data available.")
     click.echo(f"\nManifest: {result.manifest_path}")
@@ -193,7 +198,7 @@ def national(
     catchments: str | None,
     dem: str | None,
 ) -> None:
-    """Run the country-scale pipeline (proposal \u00a78 Phase 1)."""
+    """Run the country-scale pipeline (proposal Section 8 Phase 1)."""
     try:
         import osmium  # noqa: F401
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -239,14 +244,7 @@ def national(
     if result.map_path is not None:
         click.echo(f"Segment map: {result.map_path}")
     if result.correlation:
-        click.echo(
-            "\nCorrelation (Spearman \u03c1 \u2014 upstream RVI vs Flood Hub severity):"
-        )
-        for k, v in result.correlation.items():
-            click.echo(
-                f"  {k:>32s}: \u03c1={v.rho:+.3f}, n={v.n}, "
-                f"95%CI=[{v.ci_low:+.3f}, {v.ci_high:+.3f}], p={v.pvalue:.3g}"
-            )
+        _echo_correlation_summary(result.correlation)
     else:
         click.echo("Validation skipped or no Flood Hub data available.")
     click.echo(f"\nManifest: {result.manifest_path}")
